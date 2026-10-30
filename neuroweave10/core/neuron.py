@@ -66,6 +66,7 @@ class USNeuronPool:
         self.ado_i = f(self.n)                  # локальный аденозин A1
         self.allo = f(self.n)                   # нейростероид ALLO
         self.noise = f(self.n)
+        self.met_gain = 1.0     # гомеостаз критичности → метаболический тормоз
         self._spikes_hist: list = []
 
     # ------------------------------------------------------------------
@@ -122,8 +123,8 @@ class USNeuronPool:
         # (тонический PAM + нейростероидный буфер — сон/анксиолиз).
         g_inh = g_gaba * gaba_tonic * (1.0 + c.allo_gain * self.allo)
         # Метаболический тормоз: KATP (ATP↓) + GIRK (Ado A1) → V_S к E_K.
-        g_met = c.k_atp * (1.0 - self.energy) ** 2 \
-            + c.k_girk * self.ado_i
+        g_met = self.met_gain * (c.k_atp * (1.0 - self.energy) ** 2
+                                 + c.k_girk * self.ado_i)
         # GPCR-K+-токи (§3.1): M-ток подавляется ACh (mAChR→I_M↓→Θ↓),
         # sAHP растёт по Ca2+ и блокируется гистамином H1.
         g_m = 0.05 / (1.0 + ach / 0.5)          # M-current (K_v7)
@@ -161,7 +162,8 @@ class USNeuronPool:
         # аденозин A1 (продукт распада ATP) ПОВЫШАЕТ Θ — честная
         # усталость организма (Закон 5: энергия регулирует, не логирует).
         theta_eff = self.theta - vth_shift - 1.5 * ach \
-            + c.ado_theta_gain * self.ado_i
+            + c.ado_theta_gain * self.ado_i \
+            - c.hist_theta_gain * histamine   # H1: бодрость ↓Θ
         s = (self.v_s > theta_eff).float() * (self.refr <= 0).float()
         self.v_s = self.v_s - s * (self.theta - c.e_l) * 0.5
         self.refr = (self.refr - 1.0).clamp(min=0.0) + s * c.refractory

@@ -154,7 +154,7 @@ class GenesisOrganism:
     # ------------------------------------------------------------------
     def step(self, x: torch.Tensor, reward: float = 0.0,
              learn: bool = True, drive: float = 0.6,
-             stress: float = 0.0) -> GenesisOutput:
+             stress: float = 0.0, patience: float = 0.0) -> GenesisOutput:
         """Один такт dt=1 мс. x [B,input_dim]."""
         cfg = self.cfg
         s = self.chem.s
@@ -199,7 +199,16 @@ class GenesisOrganism:
         # ---- Фаза 3a: BG-дизингибиция HO + контекст PFC ----
         pfc_s = self._prev_pfc if hasattr(self, "_prev_pfc") else \
             torch.zeros(self.batch, cfg.zones[-1].n_neurons)
-        bg_out: BGOut = self.bg.step(pfc_s, s.ox, s.ado, s.ht)
+        # PFC-контур планирования: «не завершено» → 5-HT-терпение ↑
+        # → DDM-порог выше, BG не выбирает конец сюжета раньше времени.
+        bg_out: BGOut = self.bg.step(pfc_s, s.ox, s.ado,
+                                     s.ht + patience)
+        if reward != 0.0:
+            # Опиоиды → гедонистический DA-фактор стриатума (Enk/β-End
+            # усиливают обучение Go/NoGo как удовольствие от сюжета).
+            opi = self.xchem.l.enkephalin + self.xchem.l.beta_endorphin
+            self.bg.reward(reward, pfc_s.mean(0).detach(),
+                           s.da + cfg.bg.opioid_gain * opi, s.ado)
         ho_drive: Dict[str, torch.Tensor] = {}
         l5_prev = self._prev_l5 if hasattr(self, "_prev_l5") else {}
         for zname, ho in self.ho.items():

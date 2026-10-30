@@ -14,6 +14,7 @@ sparse_drive (v8): только активные пресинаптически�
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -231,6 +232,13 @@ class RegenesisOrganism(UnifiedOrganism):
         self.motor.attach_basal_ganglia(self.gcfg.bg.n_actions)
         self.motor.reset_state(batch)
         self._last_motor: Optional[Dict] = None
+        # PFC-контур предсказания: w_pred — ожидание следующего токена
+        # по предыдущему (предиктивное кодирование); масса пунктуации
+        # в предсказании → «завершённость» → терпение DDM.
+        v = self.ucfg.vocab_size
+        self.w_pred = torch.randn(v, v) * 0.05
+        self.punct_ids: set = set()
+        self._recent_ids: deque = deque(maxlen=32)
 
     # ------------------------------------------------------------------
     def step_token(self, token_ids: torch.Tensor,
@@ -242,7 +250,18 @@ class RegenesisOrganism(UnifiedOrganism):
         обучение — err=H(target)−rate × пре-след × f_mod; пластичность
         заморожена при аденилатном долге (Закон 5)."""
         x = self._encode_frame(token_ids)
-        out = self.org.step(x, reward=0.0, learn=learn, drive=0.6)
+        # PFC-контур планирования: если предсказание не видит конца
+        # фразы (пунктуация маловероятна и давно не было) — повысить
+        # 5-HT-терпение: DDM не завершает эпизод преждевременно.
+        prev_id = int(token_ids.flatten()[0].item())
+        pred_p = torch.softmax(self.w_pred[prev_id].float(), dim=-1)
+        punct_mass = float(pred_p[list(self.punct_ids)].sum()) \
+            if self.punct_ids else 0.0
+        recent_punct = any(i in self.punct_ids for i in self._recent_ids)
+        patience = 0.0 if (recent_punct or punct_mass > 0.3) \
+            else 0.6 * (1.0 - punct_mass)
+        out = self.org.step(x, reward=0.0, learn=learn, drive=0.6,
+                            patience=patience)
         zname = self.gcfg.zones[-1].name
         s_l5 = self.org._prev_l5.get(zname) \
             if hasattr(self.org, "_prev_l5") else torch.zeros(
@@ -258,6 +277,10 @@ class RegenesisOrganism(UnifiedOrganism):
         if next_ids is not None and learn:
             tgt = int(next_ids[0].item())
             reward = 1.0 if mout.token == tgt else -0.5
+            # PFC-модель ожидания: delta-правило по реальному next
+            self.w_pred[prev_id] += 0.05 * (
+                F.one_hot(torch.tensor(tgt), self.ucfg.vocab_size)
+                .float() - pred_p)
             self.motor.learn(tgt, s_l5,
                              f_mod=float(self.org.chem.f_mod(True)),
                              plasticity_ok=not self.org.plasticity_blocked,
@@ -268,6 +291,7 @@ class RegenesisOrganism(UnifiedOrganism):
         logits = self.motor.v.mean(0).unsqueeze(0)
         self._pred_logits = logits
         self._last_motor = mout
+        self._recent_ids.append(mout.token)
         return {"token": mout.token, "logits": logits, "margin": mout.margin,
                 "stp_depleted": mout.stp_depleted, "reward": reward,
                 "confidence": out.confidence, "sigma": out.sigma,
@@ -306,3 +330,109 @@ class RegenesisOrganism(UnifiedOrganism):
                 "stp_min": float(min(depletion)) if depletion else 1.0,
                 "sigma": self.org.sigma,
                 "pathology": self.org.pathology}
+
+
+# ----------------------------------------------------------------------
+# DevelopmentalController: поэтапное обучение (куррикулум)
+# ----------------------------------------------------------------------
+def _seq_pairs(story: str, stoi: Dict[str, int], seq_len: int,
+               unk: int) -> List[int]:
+    """История → список id по фиксированному словарю."""
+    from neuroweave9.data import tokenize_text
+    return [stoi.get(t, unk)
+            for t in tokenize_text(story)[:seq_len + 1]]
+
+
+def _checkpoint(u: "RegenesisOrganism", path: str,
+                itos: List[str]) -> None:
+    import os
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    ckpt = {"w_pred": u.w_pred.clone(),
+            "itos": itos,
+            "motor": {k: getattr(u.motor, k).clone()
+                      for k in ("w_l5", "w_hip", "w_lap", "w_rec_m",
+                                "stp_x", "stp_u", "out_fatigue",
+                                "rate_aff", "rate_post")
+                      if getattr(u.motor, k, None) is not None},
+            "cols": [{"w_ff": c.w_ff.w.clone(),
+                      "w_rec": c.w_rec.w.clone(),
+                      "w_fb": c.w_fb.w.clone(),
+                      "w_pv_in": c.w_pv_in.clone()}
+                     for c in u.org.hier.cols]}
+    torch.save(ckpt, path)
+
+
+def load_checkpoint(u: "RegenesisOrganism", path: str) -> None:
+    ckpt = torch.load(path, weights_only=False)
+    for k, v in ckpt.get("motor", {}).items():
+        setattr(u.motor, k, v)
+    if "w_pred" in ckpt:
+        u.w_pred = ckpt["w_pred"]
+    for col, saved in zip(u.org.hier.cols, ckpt.get("cols", [])):
+        col.w_ff.w = saved["w_ff"]
+        col.w_rec.w = saved["w_rec"]
+        col.w_fb.w = saved["w_fb"]
+        col.w_pv_in = saved["w_pv_in"]
+
+
+def run_curriculum(data_path: str = "data/10k-tinystories.parquet",
+                   preset: str = "tiny", max_vocab: int = 128,
+                   checkpoint_dir: str = "checkpoints",
+                   stages: Optional[List[tuple]] = None,
+                   only_stage: Optional[int] = None,
+                   gen_tokens: int = 300,
+                   sleep_ticks: int = 40) -> Dict:
+    """Развитие организма по этапам: (n_stories, seq_len) на стадию.
+
+    Между этапами — чекпоинт на диск и сон-консолидация; словарь
+    строится один раз на первом этапе и фиксируется (нейроны моторного
+    пула не меняют числа). Каждый этап измеряет CE→perplexity и хвост
+    генерации: tail_vocab должен расти с обучением."""
+    from neuroweave9.data import (load_stories, tokenize_text,
+                                  build_vocab_and_sequences)
+    stages = stages or [(500, 32), (4000, 64), (9800, 128)]
+    # Словарь — на первом этапе (базовая лексика)
+    first = load_stories(data_path, max_stories=stages[0][0])
+    itos, stoi, _, _, _ = build_vocab_and_sequences(
+        first, max_vocab_size=max_vocab, seq_len=stages[0][1],
+        batch_size=1)
+    u = RegenesisOrganism(UnifiedConfig(vocab_size=len(itos)),
+                          gcfg=genesis_cfg(preset))
+    u.punct_ids = {stoi[p] for p in (".", "!", "?") if p in stoi}
+    unk = stoi.get("<unk>", 1)
+    report: Dict = {"vocab": len(itos), "stages": []}
+    stories_cache: List[str] = []
+    for si, (n_stories, seq_len) in enumerate(stages):
+        if only_stage is not None and si != only_stage:
+            continue
+        if len(stories_cache) < n_stories:
+            stories_cache = load_stories(data_path,
+                                         max_stories=n_stories)
+        subset = stories_cache[:n_stories]
+        ce_sum, n_tok = 0.0, 0
+        for story in subset:
+            ids = _seq_pairs(story, stoi, seq_len, unk)
+            for a, b in zip(ids, ids[1:]):
+                r = u.step_token(torch.tensor([a]),
+                                 torch.tensor([b]), learn=True)
+                if u._pred_logits is not None:
+                    ce_sum += float(F.cross_entropy(
+                        u._pred_logits.float(),
+                        torch.tensor([b])).item())
+                    n_tok += 1
+        ce = ce_sum / max(1, n_tok)
+        u.sleep(ticks=sleep_ticks)     # консолидация между этапами
+        gen = u.generate(n_tokens=gen_tokens, seed_tokens=[1, 5, 9])
+        ckpt_path = f"{checkpoint_dir}/curriculum_stage{si + 1}.pt"
+        _checkpoint(u, ckpt_path, itos)
+        report["stages"].append({
+            "stage": si + 1, "stories": n_stories, "seq_len": seq_len,
+            "tokens": n_tok, "ce": ce,
+            "perplexity": float(torch.exp(torch.tensor(min(10.0, ce)))),
+            "tail_vocab": gen["tail_vocab"],
+            "max_repeat_run": gen["max_repeat_run"],
+            "margin_mean": gen["margin_mean"],
+            "sigma": gen["sigma"], "pathology": gen["pathology"],
+            "checkpoint": ckpt_path})
+    report["organism"] = u.report()
+    return report

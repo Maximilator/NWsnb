@@ -57,4 +57,12 @@ class HomeostaticController:
             for w in (col.w_ff, col.w_rec):
                 nrm = w.w.norm(dim=1, keepdim=True).clamp(min=1e-6)
                 w.w = w.w / nrm * 0.4
+            # 5) Гомеостаз критичности → метаболический тормоз:
+            # σ ниже цели — ослабить KATP/GIRK (меньше гиперполяризации,
+            # сеть уходит из субкритичности); выше цели — усилить.
+            if sigma < c.target_sigma - c.sigma_tol:
+                pool.met_gain = max(0.1, getattr(pool, "met_gain", 1.0) * 0.995)
+            elif sigma > c.target_sigma + c.sigma_tol:
+                pool.met_gain = min(2.0, getattr(pool, "met_gain", 1.0) * 1.005)
+            report["met_gain"] = float(getattr(pool, "met_gain", 1.0))
         return report

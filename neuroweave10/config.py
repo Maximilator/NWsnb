@@ -47,6 +47,7 @@ class USNeuronCfg:
     mg: float = 1.0             # мМ Mg2+ для Jahr-Stevens блока NMDA
     k_atp: float = 0.6          # сила KATP-тока при дефиците ATP
     k_girk: float = 0.4         # сила GIRK-тока при аденозине (A1)
+    hist_theta_gain: float = 3.0  # гистамин H1 → ↓Θ (антагонист аденозина)
     allo_gain: float = 0.5      # η_ALLO: нейростероидная амплификация GABA
     sigma: float = 0.02         # сома-шум (OU, мВ·√мс)
     tau_ou: float = 10.0        # τ OU-шума (коррелированный шум мембраны)
@@ -129,6 +130,7 @@ class BasalGangliaCfg:
     sigma_ddm: float = 0.10     # шум аккумулятора
     leak: float = 0.02          # утечка аккумулятора
     alpha_rl: float = 0.05      # скорость RL на Go/NoGo
+    opioid_gain: float = 0.4    # опиоиды (Enk/β-End) → гедонистический DA-фактор стриатума
     gamma_td: float = 0.95      # дисконт TD
     hyperdirect_ms: float = 7.0 # STN приходит за 5-10 мс до действия
     alpha_ox: float = 0.3       # орексин ↓ порог
@@ -211,7 +213,7 @@ class ChemistryCfg:
 @dataclass
 class HomeostasisCfg:
     """SOC-регуляция σ≈1 (§1.5)."""
-    target_sigma: float = 1.0
+    target_sigma: float = 0.98    # in-vivo «ревербирующий» режим (Wilting-Priesemann)
     sigma_tol: float = 0.05
     sigma_lo: float = 0.90
     sigma_hi: float = 1.05
@@ -254,7 +256,7 @@ class MotorCfg:
     g_l: float = 0.1
     beta_adapt: float = 0.05    # ALIF-адаптация моторного порога
     tau_adapt: float = 200.0
-    refractory: int = 2
+    refractory: int = 3         # абсолютный рефрактерный период, тиков
     wta_inh: float = 1.2        # глобальное делительное торможение (PV-пул)
     sub_ticks: int = 5          # внутренних мс на один токен-шаг
     sigma_ou: float = 0.05      # OU-шум мембран в фазе обучения
