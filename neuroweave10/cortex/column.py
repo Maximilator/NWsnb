@@ -57,9 +57,13 @@ class CorticalColumn:
         self.kd_vip, self.n_vip_hill = 0.4, 2.0
         # L5-подмножество (нижняя треть пула) → HO-драйверы
         self.l5_idx = torch.arange(2 * n // 3, n)
+        # Базальное дендритное дерево Poirazi: суперлинейные ветви+плато
+        from ..core.dendrite import DendriticTree
+        self.dendrite = DendriticTree(n, n_in, n_branch=4, seed=seed + 3)
 
     def reset_state(self, batch: int, device=None, dtype=torch.float32) -> None:
         self.pyr.reset_state(batch, device, dtype)
+        self.dendrite.reset_state(batch, device, dtype)
 
     # ------------------------------------------------------------------
     def step(self, x_ff: torch.Tensor, x_fb: torch.Tensor,
@@ -89,10 +93,23 @@ class CorticalColumn:
         g_nmda = g_nmda * sst_gate              # SST гейтит апикал
         g_gaba = (g_pv + g_sst).clamp(0.0, 5.0)
 
+        # Базальный вход идёт через ветви: суперлинейная сумма + плато
+        pyr_s = self._last_s if hasattr(self, "_last_s") \
+            else torch.zeros_like(g_ampa)
+        g_tree = self.dendrite.step(x_ff, pyr_s)
+        g_ampa = (g_ampa + g_tree).clamp(0.0, None)
         # Тонический фон: кортикальные нейроны получают постоянный
         # неспецифический вход, удерживающий сому вблизи порога.
         i_ext = torch.full_like(g_ampa, 1.5)
-        out = self.pyr.step(g_ampa + g_rec * 0.5, g_nmda, g_gaba, i_ext)
+        mod_ctx = self._mod_ctx if isinstance(
+            getattr(self, "_mod_ctx", None), dict) else {}
+        out = self.pyr.step(g_ampa + g_rec * 0.5, g_nmda, g_gaba, i_ext,
+                            ach=mod_ctx.get("ach", 0.0),
+                            histamine=mod_ctx.get("histamine", 0.0),
+                            nmda_gain=mod_ctx.get("nmda_gain", 1.0),
+                            p_rel=mod_ctx.get("p_rel", 1.0),
+                            vth_shift=mod_ctx.get("vth_shift", 0.0),
+                            gaba_tonic=mod_ctx.get("gaba_tonic", 1.0))
         self._last_s = out.s
 
         if learn:

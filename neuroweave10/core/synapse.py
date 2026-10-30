@@ -48,6 +48,7 @@ class GenesisSynapse:
         self.w = self.w * self.mask
         self.z_pre = torch.zeros(n_pre)     # x_j — пре-след
         self.z_post = torch.zeros(n_post)   # пост-след (для iSTDP)
+        self.eligibility = torch.zeros(n_post, n_pre)  # e_ij (3-фактор)
         self.theta_m = cfg.theta_m0         # метапластический порог BCM
         self.u_syn = torch.ones(n_post, n_pre)  # ресурс депрессии (SOC)
 
@@ -93,6 +94,10 @@ class GenesisSynapse:
         if ltp_field is not None:
             dw = dw + c.eta * f_mod * 0.1 * torch.outer(
                 err.abs(), ltp_field) * self.mask
+        # Eligibility-trace: e_ij ← e_ij·(1-dt/τ_e)+err_i·x_j
+        # (Fremaux & Gerstner 2016 — мост между ошибкой и DA-бёрстом)
+        self.eligibility = self.eligibility * (1.0 - dt / 1000.0) \
+            + torch.outer(err, x) * self.mask.float()
         self.w = (self.w + dw).clamp(c.w_min, c.w_max)
         # Медленная утечка к нулю (забывание)
         self.w = self.w * c.decay
@@ -103,3 +108,20 @@ class GenesisSynapse:
         self.update_traces(s_pre, s_post, dt)
         return SynOut(float(self.w.abs().mean()), float(dw.abs().mean()),
                       x)
+
+    def istdp_vogels(self, s_pre: torch.Tensor, s_post: torch.Tensor,
+                     dt: float = 1.0) -> float:
+        """Ингибиторный STDP Вогельса 2011 (правильная форма math.md).
+
+        При пре-спайке: Δw=η(x_post−α), α=2ρ₀τ; при пост-спайке:
+        Δw=η·x_pre. Только для sign='inh' синапсов."""
+        if self.cfg.sign != "inh":
+            return 0.0
+        c = self.cfg
+        x_pre = s_pre.mean(0); x_post = s_post.mean(0)
+        alpha = 2.0 * c.istdp_rho0 * c.tau_x
+        dw = torch.outer((x_post - alpha).clamp(min=-1.0), s_pre.mean(0)) \
+            + torch.outer(s_post.mean(0), x_pre)
+        self.w = (self.w - c.istdp_eta * dw * self.mask.float()
+                  ).clamp(c.w_min, 0.0)
+        return float(dw.abs().mean())

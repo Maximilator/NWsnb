@@ -25,6 +25,8 @@ import torch
 
 from ..action.basal_ganglia import BasalGanglia, BGOut
 from ..chemistry.modulators import NeuroChemistry
+from ..chemistry.agents import ExtendedChemistry
+from ..consciousness.metrics import ConsciousnessDashboard
 from ..chemistry.volume import VolumeTransmission
 from ..config import GenesisConfig
 from ..consciousness.attention_schema import AttentionSchema, ASTOut
@@ -78,6 +80,8 @@ class GenesisOrganism:
                                          cfg.chem.no_d, cfg.chem.no_radius,
                                          cfg.chem.h2s_tau)
         self.homeo = HomeostaticController(cfg.homeo)
+        self.xchem = ExtendedChemistry()
+        self.dash = ConsciousnessDashboard()
         self.t = 0
         self.pathology: Optional[str] = None
         self._sigma_hi_ms = 0
@@ -182,6 +186,21 @@ class GenesisOrganism:
 
         # ---- Фаза 2: кортикальные зоны ----
         vip_mod = {z.name: float(s.ht * 0.3 + 0.1) for z in cfg.zones}
+        # Расширенный химический пул: медленные агенты и их эффекты
+        self.xchem.update(spikes=activity, stress=stress, arousal=float(awake),
+                          social=float(drive), threat=stress,
+                          damage=getattr(self, '_last_mismatch', 0.0))
+        mod_ctx = {"ach": s.ach, "histamine": self.xchem.l.histamine,
+                   "nmda_gain": self.xchem.nmda_gain(),
+                   "p_rel": self.xchem.p_release_scale(),
+                   "vth_shift": self.xchem.vth_shift(),
+                   "gaba_tonic": self.xchem.gaba_tonic()}
+        for col in self.hier.cols:
+            col._mod_ctx = mod_ctx
+            for w in (col.w_ff, col.w_fb, col.w_rec):
+                w.set_metaplastic(gc=s.cort, e2=self.xchem.l.e2,
+                                  h2s=self.xchem.l.h2s if hasattr(self.xchem.l,'h2s') else 0.2,
+                                  zn=self.xchem.l.zn, mg=1.0)
         hout: HierarchyOut = self.hier.step(
             fo_out, gw_b, ho_drive, f_mod, vip_mod, learn=learn)
         self._prev_l5 = hout.l5
@@ -243,6 +262,7 @@ class GenesisOrganism:
                                 actual_focus=gw_out.winner_zone
                                 if gw_out.winner_zone >= 0 else 0)
         self._last_ast = ast_out
+        self._last_mismatch = hippo_out.mismatch
 
         # ---- Фаза 5: гомеостаз ----
         if self._prev_spikes is not None:
@@ -257,6 +277,19 @@ class GenesisOrganism:
         self.pathology = self._check_pathology(hout.spikes_all)
         errors = {z.name: float(hout.errors[z.name].abs().mean())
                   for z in cfg.zones}
+        # Дашборд сознания: PCI/R_bc/γ_ign/ECE/каузальная плотность
+        r_bc = float((gw_out.broadcast.abs().mean() > 1e-4)
+                     * sum(float(hout.errors[z.name].abs().mean() > 1e-6)
+                           for z in cfg.zones) / max(1, len(cfg.zones)))
+        self.dash.push(hout.spikes_all.flatten(),
+                       float(gw_out.ignition),
+                       float(gw_out.broadcast.abs().mean() > 1e-6),
+                       meta_out.confidence, float(1.0 - min(1.0, err_mean)),
+                       float(1.0 - ast_out.expected_accuracy), r_bc)
+        self._last_dash = self.dash.report(
+            ffr=float(sum(float(c.w_fb.w.abs().mean()) for c in self.hier.cols)
+                      / max(1e-9, sum(float(c.w_ff.w.abs().mean())
+                                      for c in self.hier.cols))))
         return GenesisOutput(
             t=self.t, action=bg_out.action,
             gw_content=gw_out.content, confidence=meta_out.confidence,

@@ -87,6 +87,12 @@ class USNeuronPool:
              g_nmda: torch.Tensor,      # [B,N] проводимость NMDA (апикал)
              g_gaba: torch.Tensor,      # [B,N] проводимость GABA
              i_ext: Optional[torch.Tensor] = None,
+             ach: float = 0.0,          # ACh: M-ток K_v7↓ → Θ↓ (encode-режим)
+             histamine: float = 0.0,    # H1: sAHP-блок → берстовая активность
+             nmda_gain: float = 1.0,    # Φ_DSer·Ψ_Zn·DHEA ко-агонистный гейт
+             p_rel: float = 1.0,        # P_release-масштаб (NPY/Dyn/AEA/Gal)
+             vth_shift: float = 0.0,    # E2-мембранный сдвиг Θ (мВ)
+             gaba_tonic: float = 1.0,   # ALLO: GABA_A PAM
              ) -> NeuronOut:
         """Один шаг интеграции (dt=1 мс), все токи сразу."""
         c = self.cfg
@@ -95,37 +101,45 @@ class USNeuronPool:
 
         # --- дендриты ---
         # Базальный: AMPA-вход (возбуждение) + связь с сомой
-        i_d = c.g_d * (B - self.v_d) + g_ampa * (c.e_exc - self.v_d)
+        i_d = c.g_d * (B - self.v_d) + g_ampa * p_rel * (c.e_exc - self.v_d)
         dv_d = (-c.g_l * (self.v_d - c.e_l) + i_d) / c.c_m
         self.v_d = self.v_d + dt * (dv_d / c.tau_d)
 
-        # Апикальный: NMDA-вход с Mg2+-блоком B(V_A)
+        # Апикальный: NMDA·(D-ser·Zn·DHEA-гейт)·B(V_A)·(E_exc−V_A)
         b_v = mg_block(self.v_a, c.mg)
-        i_a = c.g_a * (B - self.v_a) + g_nmda * b_v * (c.e_exc - self.v_a)
+        i_a = c.g_a * (B - self.v_a) \
+            + g_nmda * nmda_gain * b_v * (c.e_exc - self.v_a)
         dv_a = (-c.g_l * (self.v_a - c.e_l) + i_a) / c.c_m
         self.v_a = self.v_a + dt * (dv_a / c.tau_d_apical)
 
         # --- сома ---
         i_coup = c.g_d * (self.v_d - B) + c.g_a * (self.v_a - B)
-        # GABA: шунтирующее торможение; ALLO (нейростероид) усиливает
-        # проводимость — путь тревоги/сна (§1.4, H2S/нейростероиды).
-        g_inh = g_gaba * (1.0 + c.allo_gain * self.allo)
+        # GABA: шунтирующее торможение; ALLO усиливает проводимость
+        # (тонический PAM + нейростероидный буфер — сон/анксиолиз).
+        g_inh = g_gaba * gaba_tonic * (1.0 + c.allo_gain * self.allo)
         i_fast = g_inh * (B - c.e_cl)
-        # Метаболический тормоз: дефицит ATP открывает KATP,
-        # локальный аденозин — GIRK; оба тянут V_S к E_K (-90 мВ).
+        # Метаболический тормоз: KATP (ATP↓) + GIRK (Ado A1) → V_S к E_K.
         g_met = c.k_atp * (1.0 - self.energy) + c.k_girk * self.ado_i
         i_met = g_met * (B - c.e_k)
+        # GPCR-K+-токи (§3.1): M-ток подавляется ACh (mAChR→I_M↓→Θ↓),
+        # sAHP растёт по Ca2+ и блокируется гистамином H1.
+        g_m = 0.05 / (1.0 + ach / 0.5)          # M-current (K_v7)
+        g_ahp = 0.08 * self.ca * (1.0 - histamine / (histamine + 0.4))
+        i_gpcr = (g_m + g_ahp) * (B - c.e_k)
         ext = 0.0 if i_ext is None else i_ext
         if c.stochastic:
             self.noise = self.noise * (1.0 - dt / 10.0) + \
                 torch.randn_like(B) * (c.sigma * (dt / 10.0) ** 0.5)
         else:
             self.noise = torch.zeros_like(B)
-        dv_s = (-c.g_l * (B - c.e_l) + i_coup - i_fast - i_met + ext) / c.c_m
+        dv_s = (-c.g_l * (B - c.e_l) + i_coup - i_fast - i_met - i_gpcr
+                + ext) / c.c_m
         self.v_s = B + dt * dv_s  # сома быстрее дендритов (τ≈1 мс)
 
         # --- спайк: порог Θ_i (адаптивный) + рефрактерность ---
-        s = (self.v_s > self.theta).float() * (self.refr <= 0).float()
+        # E2-мембранный сдвиг порога и M-ток (ACh) понижают Θ
+        theta_eff = self.theta - vth_shift - 1.5 * ach
+        s = (self.v_s > theta_eff).float() * (self.refr <= 0).float()
         self.v_s = self.v_s - s * (self.theta - c.e_l) * 0.5
         self.refr = (self.refr - 1.0).clamp(min=0.0) + s * c.refractory
 

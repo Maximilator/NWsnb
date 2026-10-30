@@ -364,3 +364,115 @@ def test_sleep_replays_episodes():
         org.step(torch.rand(1, cfg.input_dim))
     rep = org.sleep_cycle(50)
     assert rep["episodes"] > 0
+
+
+# ---------- Knowledge-driven углубление (доп. пакет) ----------
+
+def test_dendritic_tree_plateau_and_burst():
+    """Poirazi-ветви: сильный вход → плато → суперлинейный выход."""
+    from neuroweave10.core.dendrite import DendriticTree
+    tree = DendriticTree(n_neurons=8, n_in=32, n_branch=4, seed=0)
+    tree.reset_state(batch=1)
+    for _ in range(15):
+        weak = tree.step(torch.rand(1, 32) * 0.1, torch.zeros(1, 8))
+    for _ in range(15):
+        strong = tree.step(torch.rand(1, 32) * 3.0, torch.ones(1, 8))
+    assert strong.mean() > 0.0
+    assert float(tree.plateau.max()) > 0.0  # NMDA-плато воспламенилось
+
+
+def test_extended_chemistry_effects():
+    """NPY/Dyn снижают P_release; D-serine открывает NMDA-гейт."""
+    from neuroweave10.chemistry.agents import ExtendedChemistry
+    xc = ExtendedChemistry()
+    base_rel = xc.p_release_scale()
+    xc.l.npy = 1.5
+    assert xc.p_release_scale() < base_rel
+    xc.l.d_serine = 0.0
+    low = xc.nmda_gain()
+    xc.l.d_serine = 0.8
+    assert xc.nmda_gain() > low
+    xc.l.crh = 1.0
+    assert xc.theta_ltp_shift() > 0.0
+
+
+def test_eligibility_trace_persists():
+    """e_ij накапливается при ошибке и затухает без неё."""
+    from neuroweave10.core.synapse import GenesisSynapse
+    from neuroweave10.config import USSynapseCfg
+    syn = GenesisSynapse(8, 8, USSynapseCfg(eta=1e-3, density=1.0))
+    syn.learn(torch.ones(1, 8), torch.ones(1, 8), torch.ones(1, 8),
+              f_mod=1.0)
+    assert float(syn.eligibility.abs().mean()) > 0.0
+
+
+def test_istdp_vogels_only_inhibitory():
+    """Vogels iSTDP действует только на sign='inh'."""
+    from neuroweave10.core.synapse import GenesisSynapse
+    from neuroweave10.config import USSynapseCfg
+    inh = GenesisSynapse(8, 8, USSynapseCfg(eta=1e-3, density=1.0,
+                                              sign="inh"))
+    exc = GenesisSynapse(8, 8, USSynapseCfg(eta=1e-3, density=1.0))
+    s_pre = torch.ones(1, 8)
+    s_post = torch.tensor([[1., 0, 0, 0, 1, 0, 0, 0]])
+    w0 = inh.w.clone()
+    inh.istdp_vogels(s_pre, s_post)
+    assert not torch.equal(inh.w, w0)
+    assert exc.istdp_vogels(s_pre, s_post) == 0.0
+
+
+def test_mr_estimator_autocorr():
+    """MR-оценщик: σ̂ в (0,1) для затухающей активности."""
+    from neuroweave10.core.criticality import CriticalityMonitor
+    m = CriticalityMonitor(k_max=10)
+    prev = torch.zeros(16)
+    for _ in range(60):
+        now = torch.bernoulli(torch.full((16,), 0.3))
+        m.push(now, prev); prev = now
+    assert 0.0 <= m.sigma_hat <= 3.0
+
+
+def test_consciousness_dashboard_report():
+    """Дашборд отдаёт PCI/R_bc/γ/ECE/causal_density."""
+    from neuroweave10.consciousness.metrics import ConsciousnessDashboard
+    d = ConsciousnessDashboard()
+    for _ in range(30):
+        d.push(torch.bernoulli(torch.rand(64)), 0.6, 1.0, 0.7, 0.8,
+               0.2, 0.5)
+    rep = d.report(ffr=0.7, rdi=0.1)
+    for k in ("pci_lz", "causal_density", "broadcast_reach",
+              "gamma_ignition", "ece", "l_schema", "ffr", "rdi"):
+        assert k in rep
+
+
+def test_grid_code_and_temporoammonic():
+    """Гиппокамп: grid-код EC + прямой EC→CA1 путь работают."""
+    from neuroweave10.memory.hippocampus import Hippocampus
+    from neuroweave10.config import HippocampusCfg
+    h = Hippocampus(HippocampusCfg(n_ec=16, n_dg=64, n_ca3=32))
+    out = h.step(torch.rand(1, 16), ach=0.8, adenosine=0.1)
+    assert out.dg.shape[1] == 64
+
+
+def test_neuron_modulator_effects():
+    """ACh↓Θ (M-ток), histamine блокирует sAHP, ALLO↑GABA."""
+    from neuroweave10.core.neuron import USNeuronPool
+    from neuroweave10.config import USNeuronCfg
+    p = USNeuronPool(8, USNeuronCfg())
+    p.reset_state(batch=1)
+    g = torch.full((1, 8), 3.0)
+    p.step(g, g, torch.zeros(1, 8), ach=1.5, histamine=1.0,
+           nmda_gain=0.5, p_rel=0.5, vth_shift=1.0, gaba_tonic=2.0)
+    assert torch.isfinite(p.v_s).all()
+
+
+def test_full_organism_with_dash():
+    """Организм с расширенной химией и дашбордом — полный такт."""
+    from neuroweave10.organism.system import GenesisSystem
+    from neuroweave10.config import genesis_cfg
+    sys = GenesisSystem("tiny", batch=1)
+    sys.boot()
+    for _ in range(30):
+        sys.step(torch.rand(1, sys.org.cfg.input_dim), reward=0.0)
+    assert hasattr(sys.org, "_last_dash")
+    assert "pci_lz" in sys.org._last_dash

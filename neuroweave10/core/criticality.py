@@ -1,21 +1,19 @@
-"""Мониторинг критичности и лавин (§1.5, §II.1.5).
+"""Мониторинг критичности и лавин (§1.5, §II.1.5; math.md §5).
 
-MR-оценщик σ̂ (Wilting & Priesemann 2018): для каждого спайка i во
-время t считаем A_i — число спайков в t+1, «вызванных» им (пропорция
-активности в потомках). σ̂ = среднее A_i — оценка показателя ветвления.
+MR-оценщик σ̂ (Wilting & Priesemann 2018): автокорреляции
+r_k = m^k → фит log r_k = k·log m̂ по истории активности
+(устойчив к субсэмплингу). Целевой режим по in-vivo данным:
+σ̂ ≈ 0.95-0.99 («ревербирующий», слегка субкритичный), τ_int=Δt/(1−m̂)
+конечен и перестраиваем — не σ=1.
 
-Лавины: покадровая активность A(t)=Σs_i(t); лавина — эпизод A>θ_aval
-между двумя тихими кадрами. Размер S=ΣA, длительность T. В критичном
-режиме P(S)~S^{-3/2}, P(T)~T^{-2} (Beggs & Plenz 2003) — контролируем
-наклон через гистограмму.
-
-Динамический диапазон Δ (Kinouchi & Copelli 2006): ответ системы
-на шкалу входа максимален при σ=1.
+Лавины: эпизод A(t)>θ_aval между тихими кадрами; P(S)~S^{-3/2},
+P(T)~T^{-2}; новизна — лавина выше скользящего квантиля.
+Динамический диапазон: Δ = 10·log10(F_0.9/F_0.1) (Kinouchi-Copelli).
 """
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Deque, Dict, List
 
 import torch
@@ -25,39 +23,31 @@ import torch
 class Avalanche:
     size: float
     duration_ms: int
-    novel: bool  # размер выше скользящего квантиля — «новизна»
+    novel: bool
 
 
 class CriticalityMonitor:
-    """Оценка σ̂ и статистики лавин по спайковому потоку всех зон."""
+    """σ̂ по автокорреляционной регрессии + статистика лавин."""
 
-    def __init__(self, k_max: int = 20, hist_bins: int = 32,
-                 novel_quantile: float = 0.95):
+    def __init__(self, k_max: int = 20, novel_quantile: float = 0.95,
+                 target_sigma: float = 0.97):
         self.k_max = k_max
         self.novel_q = novel_quantile
-        # A(t) история для MR и лавин
+        self.target = target_sigma
         self.activity: Deque[float] = deque(maxlen=2000)
         self.aval_sizes: Deque[float] = deque(maxlen=512)
         self.aval_durs: Deque[int] = deque(maxlen=512)
-        self._cur_size = 0.0
-        self._cur_dur = 0
+        self._cur_size, self._cur_dur = 0.0, 0
         self._in_avalanche = False
-        self.sigma_hat = 1.0
-        self.theta_aval = 1.0  # порог лавины = шумовой уровень
+        self.sigma_hat = target_sigma
+        self.theta_aval = 1.0
 
-    # ------------------------------------------------------------------
-    def push(self, spikes_now: torch.Tensor, spikes_prev: torch.Tensor,
-             weights: Optional[torch.Tensor] = None) -> float:
-        """Обновить σ̂: A_i = s_i(t)·(Σ_j w_ij s_j(t+1))/max(Σ_j w_ij s_j,1).
-
-        Упрощение без связности: A_i — доля активности t+1, приходящаяся
-        на каждый спайк t, если топология однородна (mean-field MR)."""
-        a_t = float(spikes_prev.sum())
+    def push(self, spikes_now: torch.Tensor,
+             spikes_prev: torch.Tensor) -> float:
         a_t1 = float(spikes_now.sum())
         self.activity.append(a_t1)
-        if a_t > 0:
-            self.sigma_hat = 0.9 * self.sigma_hat + 0.1 * (a_t1 / a_t)
-        # лавины
+        if len(self.activity) > self.k_max + 2:
+            self.sigma_hat = self._mr_estimate()
         if a_t1 > self.theta_aval:
             if not self._in_avalanche:
                 self._in_avalanche, self._cur_size, self._cur_dur = True, 0.0, 0
@@ -69,23 +59,38 @@ class CriticalityMonitor:
             self.aval_durs.append(self._cur_dur)
         return self.sigma_hat
 
+    def _mr_estimate(self) -> float:
+        """r_k = автокорреляция на лаге k; fit log r_k = k log m."""
+        import numpy as np
+        a = np.asarray(list(self.activity), dtype=float)
+        a = a - a.mean()
+        v = (a * a).mean() + 1e-12
+        rs, ks = [], []
+        for k in range(1, min(self.k_max, len(a) - 1) + 1):
+            r_k = float((a[:-k] * a[k:]).mean() / v)
+            if r_k > 1e-6:
+                rs.append(np.log(r_k)); ks.append(k)
+        if len(ks) < 2:
+            return self.sigma_hat
+        slope = float(np.polyfit(ks, rs, 1)[0])
+        return float(np.clip(np.exp(slope), 0.0, 3.0))
+
     def novel_avalanche(self) -> bool:
-        """Последняя лавина выше квантиля — событие новизны (→ VT/ACh)."""
         if len(self.aval_sizes) < 8:
             return False
         import numpy as np
-        q = float(np.quantile(list(self.aval_sizes), self.novel_q))
-        return self.aval_sizes[-1] >= q
+        return float(self.aval_sizes[-1]) >= float(
+            np.quantile(list(self.aval_sizes), self.novel_q))
 
     def dynamic_range(self, responses: List[float],
                       inputs: List[float]) -> float:
-        """Δ = Σ_x F(x)·Δx — площадь под кривой ответа (норм.)."""
-        if len(responses) < 2:
+        """Δ = 10·log10(F(0.9)/F(0.1)) (Kinouchi & Copelli 2006)."""
+        if len(responses) < 4:
             return 0.0
-        rng = max(inputs) - min(inputs) + 1e-9
-        peak = max(responses) + 1e-9
-        area = sum(responses) / len(responses) / peak
-        return float(area)
+        import numpy as np
+        r = np.sort(np.asarray(responses, dtype=float))
+        f90, f10 = r[int(0.9 * (len(r) - 1))], r[int(0.1 * (len(r) - 1))]
+        return float(10.0 * np.log10((f90 + 1e-9) / (f10 + 1e-9)))
 
     def stats(self) -> Dict[str, float]:
         return {"sigma_hat": self.sigma_hat,

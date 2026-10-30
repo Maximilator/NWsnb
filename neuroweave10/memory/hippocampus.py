@@ -42,6 +42,12 @@ class Hippocampus:
         self.w_dg_ca3 = torch.randn(cfg.n_ca3, cfg.n_dg, generator=g) * 0.1
         self.w_ca3 = torch.zeros(cfg.n_ca3, cfg.n_ca3)   # Хопфилд
         self.w_ca3_ca1 = torch.randn(cfg.n_ec, cfg.n_ca3, generator=g) * 0.1
+        # Темпороаммонический путь: прямой EC_III → CA1 (минуя DG/CA3)
+        self.w_ec_ca1 = torch.randn(cfg.n_ec, cfg.n_ec, generator=g) * 0.2
+        # Grid-код EC: cos(ω·proj+φ) — метрика пространства MEC
+        self.grid_freq = torch.rand(cfg.n_ec, generator=g) * 4.0 + 1.0
+        self.grid_phase = torch.rand(cfg.n_ec, generator=g) * 6.283
+        self.w_in_ec = torch.randn(cfg.n_ec, cfg.n_ec, generator=g) * 0.5
         self.dg_age = torch.ones(cfg.n_dg)               # возраст гранул
         self.tick_n = 0
         # Эпизодический буфер: (ec, dg, ca3, ошибка, uncertainty)
@@ -90,15 +96,16 @@ class Hippocampus:
         self.tick_n += 1
         if self.tick_n % self.cfg.neurogenesis_period == 0:
             self.neurogenesis()
-        ec = ec_in
+        proj = ec_in @ self.w_in_ec.t()
+        ec = torch.cos(self.grid_freq * proj + self.grid_phase)
         dg = self.dg_code(ec)
         ca3_raw = torch.relu(dg @ self.w_dg_ca3.t())
         ca3 = ca3_raw
         if learn:
             self.ca3_store(ca3)
         ca3_full = self.ca3_retrieve(ca3)
-        # CA1-компаратор: реконструкция vs энторинальный вход
-        recon = ca3_full @ self.w_ca3_ca1.t()
+        # CA1-компаратор: CA3-реконструкция vs прямой EC_III-вход
+        recon = ca3_full @ self.w_ca3_ca1.t() + ec @ self.w_ec_ca1.t()
         mismatch = float((recon - ec).pow(2).mean())
         burst_da = float(mismatch > self.cfg.ca1_threshold) * min(
             1.0, mismatch / self.cfg.ca1_threshold)
