@@ -81,6 +81,8 @@ class GenesisOrganism:
                                          cfg.chem.h2s_tau)
         self.homeo = HomeostaticController(cfg.homeo)
         self.xchem = ExtendedChemistry()
+        from ..memory.working import SilentWorkingMemory
+        self.wm = SilentWorkingMemory(cfg.zones[-1].n_neurons)
         from ..core.interoception import InteroceptiveField
         self.intero = InteroceptiveField([z.name for z in cfg.zones])
         self.dash = ConsciousnessDashboard()
@@ -284,6 +286,10 @@ class GenesisOrganism:
                 hout.spikes_all.mean(0),
                 self._prev_spikes.mean(0))
         hom_rep = self.homeo.regulate(self.hier, self.sigma)
+        # Рабочая память PFC: спайк-паттерн → STP-фацилитация (без огня)
+        if awake:
+            self.wm.write(self._prev_pfc > 0, strength=0.1)
+        self.wm.tick(dt=1.0, active_hold=awake)
         # Нейромод-эффекты: novelty → NE/DA-бёрсты от CA1
         s.ne += hippo_out.lc_ne_burst * 0.1
         s.da += hippo_out.vta_da_burst * 0.05
@@ -329,9 +335,12 @@ class GenesisOrganism:
         self.chem.s.ado = 0.8
         self.chem.s.ach = 0.1
         n_replayed = 0
-        for _ in range(ticks):
+        for i in range(ticks):
             self.step(torch.zeros(self.batch, self.cfg.input_dim),
                       learn=True)
+            # Сонные веретёна: TRN-осцилляции ~10 Гц синхронизируют
+            # таламо-кортикальную петлю с SWR-реплеем гиппокампа
+            _ = self.fo.spindle(i)
             n_replayed += len(getattr(self.hipp, "_dbg_replayed", []))
         self.hier.consolidate(0.5)
         self.chem.s.ado = 0.3

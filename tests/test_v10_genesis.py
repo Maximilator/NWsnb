@@ -539,3 +539,26 @@ def test_da_tag_prioritizes_replay():
     h.store_episode(ec, torch.rand(1, 64), torch.rand(1, 32), 0.5, 0.5,
                     da_tag=0.0)
     assert h.episodes[0][3] > h.episodes[1][3]
+
+
+# ---------- Activity-silent WM и веретёна ----------
+
+def test_silent_working_memory():
+    """STP-хранилище: запись паттерна → пробный спайк → реактивация."""
+    from neuroweave10.memory.working import SilentWorkingMemory
+    wm = SilentWorkingMemory(16)
+    pat = torch.zeros(1, 16); pat[0, :4] = 1.0
+    wm.write(pat, strength=1.0)
+    for _ in range(10):
+        wm.tick(1.0, active_hold=False)
+    out = wm.probe(torch.ones(1, 16), k=4)
+    assert out.reactivated.sum() >= 1.0
+    assert out.stored_strength > 0.0
+
+
+def test_trn_spindle_oscillates():
+    """Сонное веретено TRN — осциллирующий гейт ~10 Гц."""
+    from neuroweave10.thalamus.relay import ThalamusFO
+    fo = ThalamusFO(8)
+    g0 = fo.spindle(0); g25 = fo.spindle(25)
+    assert not torch.equal(g0, g25)

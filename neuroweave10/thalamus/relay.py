@@ -52,6 +52,14 @@ class ThalamusFO:
             out = x  # tonic: линейный релей
         return out * self.gate.unsqueeze(0)
 
+    def spindle(self, t_ms: int, freq_hz: float = 10.0) -> torch.Tensor:
+        """Сонное веретено: TRN-пачки ~10 Гц во время сна (NREM).
+        Возвращает осциллирующий гейт — таламические реле пульсируют,
+        запуская SWR-обвязку гиппокампа синхронно с корой."""
+        import math
+        return torch.full((self.n,), 0.5 + 0.5 * math.sin(
+            2.0 * math.pi * freq_hz * t_ms / 1000.0))
+
 
 class ThalamicHO:
     """Higher-order ядро: выбор драйверов L5 → следующая зона (§II.1.4).

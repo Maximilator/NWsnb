@@ -91,7 +91,11 @@ class CorticalColumn:
         sst_act = torch.relu(g_nmda @ self.w_sst_in.t() * 0.1)
         g_sst = (sst_act @ self.w_sst_in) * sst_gate
         g_nmda = g_nmda * sst_gate              # SST гейтит апикал
-        g_gaba = (g_pv + g_sst).clamp(0.0, 5.0)
+        # Бёрлин E/I: торможение ∝ остаточной ошибке кодирования —
+        # где декод неточен, торможение растёт (баланс из точности).
+        ei_scale = 1.0 + 0.5 * float(
+            getattr(self, "_last_resid", 0.0))
+        g_gaba = ((g_pv + g_sst) * ei_scale).clamp(0.0, 5.0)
 
         # Базальный вход идёт через ветви: суперлинейная сумма + плато
         pyr_s = self._last_s if hasattr(self, "_last_s") \
