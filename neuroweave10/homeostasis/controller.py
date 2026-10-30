@@ -53,8 +53,10 @@ class HomeostaticController:
             col.w_pv_in += d_inh * 0.01
             col.w_pv_in.clamp_(0.0, 5.0)
             report["istdp"] += abs(d_inh)
-            # 4) SORN-нормировка входа каждого нейрона
-            for w in (col.w_ff, col.w_rec):
+            # 4) SORN-нормировка входа каждого нейрона (все три
+            # проекции — иначе неконтролируемый канал растёт
+            # экспоненциально под SOC-бустом).
+            for w in (col.w_ff, col.w_fb, col.w_rec):
                 nrm = w.w.norm(dim=1, keepdim=True).clamp(min=1e-6)
                 w.w = w.w / nrm * 0.4
             # 5) Гомеостаз критичности → метаболический тормоз:
