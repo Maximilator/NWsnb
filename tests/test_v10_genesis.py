@@ -476,3 +476,28 @@ def test_full_organism_with_dash():
         sys.step(torch.rand(1, sys.org.cfg.input_dim), reward=0.0)
     assert hasattr(sys.org, "_last_dash")
     assert "pci_lz" in sys.org._last_dash
+
+
+# ---------- Единый организм v8+v9+v10 ----------
+
+def test_unified_organism_next_token():
+    """v9-энкодер→v10-организм→v9-ридаут→CE→reward: полный цикл."""
+    from neuroweave10.unified import UnifiedOrganism
+    org = UnifiedOrganism()
+    seq = torch.randint(0, 128, (30,))
+    rep = org.run_sequence(seq)
+    assert rep.tokens == 30
+    assert 0.0 < rep.sparse_saving <= 1.0   # v8-разрежение работает
+    assert rep.sigma > 0.0
+    assert rep.pathology is None
+
+
+def test_unified_reward_drives_da():
+    """CE-ошибка → отрицательный reward → DA/TD-канал организма."""
+    from neuroweave10.unified import UnifiedOrganism
+    org = UnifiedOrganism()
+    toks = torch.tensor([3])
+    r1 = org.step_token(toks, torch.tensor([7]))   # нет предыдущего прогноза
+    r2 = org.step_token(toks, torch.tensor([7]))   # CE есть → reward<0
+    assert r1["reward"] == 0.0
+    assert r2["reward"] < 0.0
