@@ -51,6 +51,7 @@ class GenesisSynapse:
         self.eligibility = torch.zeros(n_post, n_pre)  # e_ij (3-фактор)
         self.theta_m = cfg.theta_m0         # метапластический порог BCM
         self.u_syn = torch.ones(n_post, n_pre)  # ресурс депрессии (SOC)
+        self.stp_gain = 1.0          # астроцитарный глиотрансмиттерный гейт
 
     # ------------------------------------------------------------------
     def set_metaplastic(self, gc: float, e2: float, h2s: float,
@@ -61,7 +62,7 @@ class GenesisSynapse:
 
     def drive(self, x: torch.Tensor) -> torch.Tensor:
         """Проводимость: g = (x @ W_eff), W_eff = w·mask·u_syn."""
-        return x @ (self.w * self.mask * self.u_syn).t()
+        return x @ (self.w * self.mask * self.u_syn * self.stp_gain).t()
 
     def update_traces(self, s_pre: torch.Tensor, s_post: torch.Tensor,
                       dt: float = 1.0) -> None:

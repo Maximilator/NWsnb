@@ -33,8 +33,10 @@ from ..consciousness.attention_schema import AttentionSchema, ASTOut
 from ..consciousness.meta_head import MetaHead, MetaOut
 from ..consciousness.workspace import GlobalWorkspace, GWOut
 from ..cortex.hierarchy import CorticalHierarchy, HierarchyOut
+from ..cortex.astrocyte import AstrocyteMicrodomain
 from ..homeostasis.controller import HomeostaticController
 from ..memory.hippocampus import Hippocampus, HippoOut
+from ..memory.laplace import LaplaceBank
 from ..thalamus.relay import ThalamicHO, ThalamusFO
 from ..thalamus.trn import TRN
 
@@ -86,6 +88,18 @@ class GenesisOrganism:
         from ..core.interoception import InteroceptiveField
         self.intero = InteroceptiveField([z.name for z in cfg.zones])
         self.dash = ConsciousnessDashboard()
+        # REGENESIS Закон 4: память и модуляторы — в физике, не в векторе
+        # Астроциты микродоменов: stp_gain синапсов + θ_Ca плато дендрита
+        self.astro = [AstrocyteMicrodomain(z.n_neurons) for z in cfg.zones]
+        # Лапласов спектр: медленные шкалы → возбудимость L5
+        self.lap = LaplaceBank(cfg.input_dim)
+        # Гиппокамп CA1→L5: NMDA+Mg²⁺-гейт (прайминг, не спайк)
+        l5w = lambda n: n - 2 * n // 3
+        self.w_hpc = {z.name: torch.randn(l5w(z.n_neurons),
+                                          cfg.hippo.n_ec) * 0.2
+                      for z in cfg.zones}
+        self._prev_ca1: Optional[torch.Tensor] = None
+        self.plasticity_blocked = False
         self.t = 0
         self.pathology: Optional[str] = None
         self._sigma_hi_ms = 0
@@ -98,7 +112,11 @@ class GenesisOrganism:
     def reset_state(self, batch: int) -> None:
         self.batch = batch
         self.hier.reset_state(batch)
+        self.lap.reset_state(batch)
+        for a in self.astro:
+            a.reset_state(batch)
         self._prev_spikes = None
+        self._prev_ca1 = None
 
     # ------------------------------------------------------------------
     def _check_pathology(self, spikes_all: torch.Tensor) -> Optional[str]:
@@ -151,10 +169,18 @@ class GenesisOrganism:
                          if hasattr(self, "ast") else 0.5,
                          drive=drive, stress=stress,
                          spikes=activity)
-        energy_ok = float(torch.cat(
-            [c.pyr.energy.flatten() for c in self.hier.cols]).mean()
-            > cfg.chem.theta_energy) if self.t > 1 else 1.0
+        e_mean = float(torch.cat(
+            [c.pyr.energy.flatten() for c in self.hier.cols]).mean()) \
+            if all(hasattr(c.pyr, "energy") for c in self.hier.cols) \
+            else 1.0
+        energy_ok = e_mean > cfg.chem.theta_energy
+        # Закон 5: аденилатный долг выше порога → w_fast не обновляются
+        # (пластичность — метаболически дорогой процесс).
+        debt = 1.0 - e_mean
+        self.plasticity_blocked = debt > cfg.chem.atp_debt_block
         f_mod = self.chem.f_mod(energy_ok)
+        if self.plasticity_blocked:
+            f_mod = 0.0
         awake = self.chem.is_awake
 
         # ---- Фаза 1: сенсорика → таламус ----
@@ -183,6 +209,7 @@ class GenesisOrganism:
                 [z.name for z in cfg.zones].index(zname) - 1]
             drive_in = l5_prev.get(src_name, torch.zeros(
                 self.batch, ho.n_in))
+            _ = src  # src-зона уже найдена ниже
             # Базовая дизингибиция BG держит HO приоткрытым; решение —
             # полное открытие выбранного канала.
             ho_drive[zname] = ho.step(
@@ -199,14 +226,32 @@ class GenesisOrganism:
                    "p_rel": self.xchem.p_release_scale(),
                    "vth_shift": self.xchem.vth_shift(),
                    "gaba_tonic": self.xchem.gaba_tonic()}
-        for col in self.hier.cols:
+        # Закон 4: Лапласовы медленные шкалы → адаптация порога L5
+        lap_slow = self.lap.step(x).mean(0)
+        lap_scalar = float(self.lap.slow_profile().mean())
+        # Астроциты прошлого такта: stp_gain синапсов + θ_Ca плато
+        for col, ast in zip(self.hier.cols, self.astro):
             col._mod_ctx = mod_ctx
+            col._hipp_in = self._prev_ca1 @ self.w_hpc[col.name].t() \
+                if self._prev_ca1 is not None else None
+            if self.t > 1:
+                glio = ast.step(col._last_s if hasattr(col, "_last_s")
+                                else torch.zeros(self.batch,
+                                                 col.zcfg.n_neurons),
+                                ne=s.ne)
+                col.w_ff.stp_gain = glio.mean(0).unsqueeze(1)  # [N,1]
+                col.dendrite.theta_ca = -25.0 + ast.theta_ca_shift()
             for w in (col.w_ff, col.w_fb, col.w_rec):
                 w.set_metaplastic(gc=s.cort, e2=self.xchem.l.e2,
                                   h2s=self.xchem.l.h2s if hasattr(self.xchem.l,'h2s') else 0.2,
                                   zn=self.xchem.l.zn, mg=1.0)
         hout: HierarchyOut = self.hier.step(
             fo_out, gw_b, ho_drive, f_mod, vip_mod, learn=learn)
+        # Медленный лапласов контекст сдвигает Θ L5 (возбудимость):
+        # длинный контекст ↑ → L5 легче достигает порога.
+        th_shift = (0.5 - lap_scalar) * 0.4
+        for col in self.hier.cols:
+            col.pyr.theta[:, col.l5_idx] += th_shift * cfg.dt * 0.01
         self._prev_l5 = hout.l5
         self._prev_pfc = hout.zones[cfg.zones[-1].name].s
         self._prev_spikes = hout.spikes_all
@@ -226,6 +271,8 @@ class GenesisOrganism:
         self.hipp.store_episode(ec_in, hippo_out.dg, hippo_out.ca3,
                                 err_mean, unc,
                                 da_tag=hippo_out.vta_da_burst)
+        self._prev_ca1 = hippo_out.ca1_out.detach()
+        self._last_lap_slow = lap_slow
         if not awake:  # SWR-реплей
             def cortical_write(ec, err):
                 for col in self.hier.cols:

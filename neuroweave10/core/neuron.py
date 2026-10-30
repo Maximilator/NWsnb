@@ -112,33 +112,50 @@ class USNeuronPool:
         dv_a = (-c.g_l * (self.v_a - c.e_l) + i_a) / c.c_m
         self.v_a = self.v_a + dt * (dv_a / c.tau_d_apical)
 
-        # --- сома ---
-        i_coup = c.g_d * (self.v_d - B) + c.g_a * (self.v_a - B)
-        # GABA: шунтирующее торможение; ALLO усиливает проводимость
+        # --- сома: проводимости (не токи — Закон 3, шунт-физика) ---
+        # GABA: шунтирующая проводимость к E_Cl; ALLO усиливает её
         # (тонический PAM + нейростероидный буфер — сон/анксиолиз).
         g_inh = g_gaba * gaba_tonic * (1.0 + c.allo_gain * self.allo)
-        i_fast = g_inh * (B - c.e_cl)
         # Метаболический тормоз: KATP (ATP↓) + GIRK (Ado A1) → V_S к E_K.
         g_met = c.k_atp * (1.0 - self.energy) + c.k_girk * self.ado_i
-        i_met = g_met * (B - c.e_k)
         # GPCR-K+-токи (§3.1): M-ток подавляется ACh (mAChR→I_M↓→Θ↓),
         # sAHP растёт по Ca2+ и блокируется гистамином H1.
         g_m = 0.05 / (1.0 + ach / 0.5)          # M-current (K_v7)
         g_ahp = 0.08 * self.ca * (1.0 - histamine / (histamine + 0.4))
-        i_gpcr = (g_m + g_ahp) * (B - c.e_k)
+        g_gpcr = g_m + g_ahp
         ext = 0.0 if i_ext is None else i_ext
         if c.stochastic:
-            self.noise = self.noise * (1.0 - dt / 10.0) + \
-                torch.randn_like(B) * (c.sigma * (dt / 10.0) ** 0.5)
+            # OU-шум Орнштейна-Уленбека: коррелированный во времени
+            # мембранный шум (τ_ou≈10 мс) — биологическая стохастичность
+            # фазы обучения, заменяет алгоритмический Scheduled Sampling.
+            self.noise = self.noise * (1.0 - dt / c.tau_ou) + \
+                torch.randn_like(B) * (c.sigma * (dt / c.tau_ou) ** 0.5)
         else:
             self.noise = torch.zeros_like(B)
-        dv_s = (-c.g_l * (B - c.e_l) + i_coup - i_fast - i_met - i_gpcr
-                + ext) / c.c_m
-        self.v_s = B + dt * dv_s  # сома быстрее дендритов (τ≈1 мс)
+
+        # --- сома: EXACT-STEP по проводимостям (REGENESIS, Закон 3) ---
+        # GABA — шунтирующая проводимость к E_Cl≈-75 мВ, не ток-вычитание.
+        # Точное решение C_m dV/dt = -Σ_i g_i(V-E_i) + I_ext за шаг dt:
+        #   V_inf = (Σ_i g_i·E_i + I_ext)/Σ_i g_i   — целевой потенциал
+        #   τ_eff = C_m/Σ_i g_i                     — эффективная константа
+        #   V ← V_inf + (V−V_inf)·exp(−dt/τ_eff)
+        # Торможение шунтирует: при g_inh→∞ V→E_Cl (не ниже); возбуждение
+        # прижато к E_exc. Никакой гиперполяризации ниже реверсии хлора.
+        g_inh_tot = g_inh + g_met + g_gpcr  # все тормозные проводимости
+        g_exc_tot = c.g_d + c.g_a           # связи с дендритами (к их V)
+        g_tot = c.g_l + g_exc_tot + g_inh_tot
+        v_inf = (c.g_l * c.e_l + c.g_d * self.v_d + c.g_a * self.v_a
+                 + g_inh * c.e_cl + (g_met + g_gpcr) * c.e_k
+                 + ext + self.noise) / g_tot.clamp(min=1e-6)
+        tau_eff = c.c_m / g_tot.clamp(min=1e-6)
+        self.v_s = v_inf + (B - v_inf) * torch.exp(-dt / tau_eff)
 
         # --- спайк: порог Θ_i (адаптивный) + рефрактерность ---
-        # E2-мембранный сдвиг порога и M-ток (ACh) понижают Θ
-        theta_eff = self.theta - vth_shift - 1.5 * ach
+        # E2-мембранный сдвиг порога и M-ток (ACh) понижают Θ;
+        # аденозин A1 (продукт распада ATP) ПОВЫШАЕТ Θ — честная
+        # усталость организма (Закон 5: энергия регулирует, не логирует).
+        theta_eff = self.theta - vth_shift - 1.5 * ach \
+            + c.ado_theta_gain * self.ado_i
         s = (self.v_s > theta_eff).float() * (self.refr <= 0).float()
         self.v_s = self.v_s - s * (self.theta - c.e_l) * 0.5
         self.refr = (self.refr - 1.0).clamp(min=0.0) + s * c.refractory

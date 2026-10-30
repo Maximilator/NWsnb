@@ -32,7 +32,7 @@ class USNeuronCfg:
     g_d: float = 0.25           # связь сома↔базальный дендрит
     g_a: float = 0.05           # связь сома↔апикальный дендрит
     e_exc: float = 0.0          # реверсия AMPA/NMDA
-    e_cl: float = -70.0         # реверсия GABA (шунт, не гиперполяризует)
+    e_cl: float = -75.0         # реверсия GABA_A Cl- (REGENESIS Закон 3)
     e_k: float = -90.0          # реверсия K+ (KATP/GIRK — метаболический ток)
     tau_d: float = 10.0         # τ дендритов (базальный)
     tau_d_apical: float = 60.0  # τ апикального дендрита (NMDA-доминант)
@@ -49,6 +49,8 @@ class USNeuronCfg:
     k_girk: float = 0.4         # сила GIRK-тока при аденозине (A1)
     allo_gain: float = 0.5      # η_ALLO: нейростероидная амплификация GABA
     sigma: float = 0.02         # сома-шум (OU, мВ·√мс)
+    tau_ou: float = 10.0        # τ OU-шума (коррелированный шум мембраны)
+    ado_theta_gain: float = 6.0 # Ado A1 → +Θ (честная усталость, Закон 5)
     stochastic: bool = True
     dt: float = 1.0
 
@@ -203,6 +205,7 @@ class ChemistryCfg:
     h2s_tau: float = 60000.0         # H2S → D-serine → NMDA (минуты)
     mg_base: float = 1.0
     zn_tau: float = 500.0            # Zn2+ миллисекундная шкала
+    atp_debt_block: float = 0.5  # аденилатный долг >θ → w_fast заморожены
 
 
 @dataclass
@@ -236,6 +239,34 @@ class PathologyCfg:
 
 
 @dataclass
+class MotorCfg:
+    """Моторная кора REGENESIS (Закон 1): спайковый пул вместо MLP.
+
+    vocab нейронов с той же ALIF-проводимостной физикой; выбор токена —
+    WTA (первый/максимум спайков за суб-такты), никакого argmax по логитам
+    обучаемого декодера. STP Tsodyks-Markram на афферентах — усталость
+    вместо алгоритмического Veto."""
+    tau_m: float = 10.0         # мембранная τ моторных нейронов, мс
+    theta0: float = -50.0       # базовый порог, мВ
+    e_l: float = -70.0
+    e_exc: float = 0.0
+    e_cl: float = -75.0
+    g_l: float = 0.1
+    beta_adapt: float = 0.05    # ALIF-адаптация моторного порога
+    tau_adapt: float = 200.0
+    refractory: int = 2
+    wta_inh: float = 1.2        # глобальное делительное торможение (PV-пул)
+    sub_ticks: int = 5          # внутренних мс на один токен-шаг
+    sigma_ou: float = 0.05      # OU-шум мембран в фазе обучения
+    # STP Tsodyks-Markram на синапсах L5→моторный пул
+    stp_u0: float = 0.5         # базальная утилизация везикул U
+    stp_tau_d: float = 200.0    # восстановление ресурса x, мс
+    stp_tau_f: float = 50.0     # распад утилизации u, мс
+    out_tau: float = 25.0       # усталость выхода нейрона (вес 1→0.2 за ~30 мс)
+    eta_motor: float = 2e-3     # скорость трёхфакторного обучения w_l5
+
+
+@dataclass
 class GenesisConfig:
     """Полная конфигурация организма Genesis."""
     input_dim: int = 64
@@ -259,6 +290,7 @@ class GenesisConfig:
     chem: ChemistryCfg = field(default_factory=ChemistryCfg)
     homeo: HomeostasisCfg = field(default_factory=HomeostasisCfg)
     patho: PathologyCfg = field(default_factory=PathologyCfg)
+    motor: MotorCfg = field(default_factory=MotorCfg)
 
     def zone(self, name: str) -> ZoneCfg:
         for z in self.zones:

@@ -205,3 +205,101 @@ def run_tinystories(data_path: str = "data/TinyStories_train_4k.txt",
         float(torch.exp(torch.tensor(min(10.0, c)))) for c in ce_hist]
     metrics["organism"] = u.report()
     return metrics
+
+
+# ----------------------------------------------------------------------
+class RegenesisOrganism(UnifiedOrganism):
+    """«True Bio-Organism»: моторная кора вместо MLP-декодера.
+
+    Выходной токен — спайк WTA-победителя в пуле моторных нейронов
+    (Закон 1). Афференты L5→моторный пул несут Tsodyks-Markram
+    STP-депрессию: повтор нейрона истощает его везикулы — петля угасает
+    без вето/штрафов (Закон 2). Обучение — трёхфакторное, без
+    backprop; perplexity замеряется через softmax(V) чисто как метрика.
+    """
+
+    def __init__(self, cfg: Optional[UnifiedConfig] = None,
+                 gcfg: Optional[GenesisConfig] = None, batch: int = 1,
+                 seed: int = 0):
+        super().__init__(cfg, gcfg, batch, seed)
+        from ..motor import MotorPool
+        z = self.gcfg.zones[-1]
+        n_l5 = z.n_neurons - 2 * z.n_neurons // 3
+        self.motor = MotorPool(self.ucfg.vocab_size, n_l5,
+                               self.gcfg.hippo.n_ec, self.gcfg.input_dim,
+                               self.gcfg.motor, seed=seed + 7)
+        self.motor.reset_state(batch)
+        self._last_motor: Optional[Dict] = None
+
+    # ------------------------------------------------------------------
+    def step_token(self, token_ids: torch.Tensor,
+                   next_ids: Optional[torch.Tensor] = None,
+                   learn: bool = True) -> Dict:
+        """Токен → спайки → организм → моторный WTA → токен.
+
+        reward: спайковое совпадение с next (биологическая оценка, не CE);
+        обучение — err=H(target)−rate × пре-след × f_mod; пластичность
+        заморожена при аденилатном долге (Закон 5)."""
+        x = self._encode_frame(token_ids)
+        out = self.org.step(x, reward=0.0, learn=learn, drive=0.6)
+        zname = self.gcfg.zones[-1].name
+        s_l5 = self.org._prev_l5.get(zname) \
+            if hasattr(self.org, "_prev_l5") else torch.zeros(
+                self.batch, self.motor.n_l5)
+        hipp_v = self.org._prev_ca1
+        lap = getattr(self.org, "_last_lap_slow", None)
+        if lap is not None and lap.dim() == 1:
+            lap = lap.unsqueeze(0)
+        mout = self.motor.step(s_l5, hipp_v, lap, ou_on=learn)
+        reward = 0.0
+        if next_ids is not None and learn:
+            tgt = int(next_ids[0].item())
+            reward = 1.0 if mout.token == tgt else -0.5
+            self.motor.learn(tgt, s_l5,
+                             f_mod=float(self.org.chem.f_mod(True)),
+                             plasticity_ok=not self.org.plasticity_blocked,
+                             reward=reward)
+            out2 = self.org.step(torch.zeros_like(x), reward=reward,
+                                 learn=learn, drive=0.6)
+        # Метрика: softmax(V) — только для perplexity, выбор идёт WTA
+        logits = self.motor.v.mean(0).unsqueeze(0)
+        self._pred_logits = logits
+        self._last_motor = mout
+        return {"token": mout.token, "logits": logits, "margin": mout.margin,
+                "stp_depleted": mout.stp_depleted, "reward": reward,
+                "confidence": out.confidence, "sigma": out.sigma,
+                "pathology": out.pathology}
+
+    # ------------------------------------------------------------------
+    def generate(self, n_tokens: int = 2000,
+                 seed_tokens: Optional[List[int]] = None) -> Dict:
+        """Свободная генерация: WTA-токен подаётся на вход следующего
+        такта — организм сам ведёт последовательность (Закон 1).
+
+        Диагностика: margin (разрыв V победителя), размер словаря в
+        хвосте, длина максимальной петли повторов, STP-истощение."""
+        ids: List[int] = list(seed_tokens or [0])
+        margins: List[float] = []
+        depletion: List[float] = []
+        for _ in range(n_tokens):
+            r = self.step_token(torch.tensor([ids[-1]]), learn=True)
+            ids.append(r["token"])
+            margins.append(r["margin"])
+            depletion.append(r["stp_depleted"])
+            if r["pathology"]:
+                break
+        tail = ids[-200:] if len(ids) >= 200 else ids
+        # Максимальный прогон одного токена (петля)
+        run, max_run = 1, 1
+        for a, b in zip(ids, ids[1:]):
+            run = run + 1 if a == b else 1
+            max_run = max(max_run, run)
+        return {"ids": ids, "margin_mean": float(
+                    torch.tensor(margins).mean()) if margins else 0.0,
+                "margin_max": float(max(margins)) if margins else 0.0,
+                "tail_vocab": len(set(tail)),
+                "total_vocab": len(set(ids)),
+                "max_repeat_run": max_run,
+                "stp_min": float(min(depletion)) if depletion else 1.0,
+                "sigma": self.org.sigma,
+                "pathology": self.org.pathology}

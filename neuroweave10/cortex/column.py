@@ -69,10 +69,23 @@ class CorticalColumn:
     def step(self, x_ff: torch.Tensor, x_fb: torch.Tensor,
              f_mod: float, vip_mod: float,
              ltp_field: Optional[torch.Tensor] = None,
+             hipp_drive: Optional[torch.Tensor] = None,
              learn: bool = True, dt: float = 1.0) -> ColumnOut:
-        """x_ff [B,n_in] → basal AMPA; x_fb [B,n_fb] → apical NMDA."""
+        """x_ff [B,n_in] → basal AMPA; x_fb [B,n_fb] → apical NMDA.
+        hipp_drive — CA1→L5 через NMDA+Mg²⁺-гейт (прайминг, не спайк)."""
         g_ampa = self.w_ff.drive(x_ff).clamp(0.0, None) * 4.0
         g_nmda = self.w_fb.drive(x_fb).clamp(0.0, None)
+        # Закон 4: гиппокамп→L5 по апикальному NMDA-каналу; Mg-блок
+        # в нейроне гарантирует, что без базального входа CA1 только
+        # подготавливает кору (суб-пороговый прайминг).
+        if hipp_drive is None:
+            hipp_drive = getattr(self, "_hipp_in", None)
+        if hipp_drive is not None:
+            hd = hipp_drive
+            if hd.dim() == 1:
+                hd = hd.unsqueeze(0)
+            g_nmda = g_nmda.clone()
+            g_nmda[:, self.l5_idx] += hd[:, :self.l5_idx.numel()]
         g_rec = self.w_rec.drive(self._last_s) \
             if hasattr(self, "_last_s") else torch.zeros_like(g_ampa)
 

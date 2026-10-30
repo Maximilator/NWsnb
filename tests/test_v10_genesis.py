@@ -571,3 +571,93 @@ def test_tinystories_pipeline_learns():
     p = m["perplexity_per_epoch"]
     assert p[-1] <= p[0] * 1.5          # не деградирует
     assert m["organism"]["sigma"] > 0.0
+
+
+# ---------- REGENESIS: законы 1–5 ----------
+
+def test_motor_pool_wta_selects():
+    """Закон 1: выбор токена — WTA спайковая гонка, не argmax MLP."""
+    from neuroweave10.motor import MotorPool
+    from neuroweave10.config import MotorCfg
+    m = MotorPool(16, 8, 8, 4, MotorCfg(), seed=1)
+    m.reset_state(1)
+    s_l5 = torch.zeros(1, 8); s_l5[0, :3] = 1.0
+    out = m.step(s_l5)
+    assert 0 <= out.token < 16
+    assert out.firing_rate.sum() >= 0.0
+
+
+def test_stp_kills_repetition_loop():
+    """Закон 2: STP истощает везикулы — повторный нейрон ослабевает."""
+    from neuroweave10.motor import MotorPool
+    from neuroweave10.config import MotorCfg
+    m = MotorPool(16, 8, 8, 4, MotorCfg(), seed=1)
+    m.reset_state(1)
+    m.w_l5 = torch.ones(16, 8) * 0.8        # сильный драйв → спайки
+    s_l5 = torch.ones(1, 8)
+    x0 = m.stp_x.clone().mean()
+    for _ in range(8):
+        m.step(s_l5)
+    assert float(m.stp_x.mean()) < float(x0)          # ресурс упал
+    assert float(m.out_fatigue.min()) < 1.0           # усталость выхода
+
+
+def test_shunting_gaba_clamps_above_ecl():
+    """Закон 3: GABA — шунт к E_Cl; V не уходит ниже реверсии хлора."""
+    from neuroweave10.core.neuron import USNeuronPool
+    from neuroweave10.config import USNeuronCfg
+    cfg = USNeuronCfg(stochastic=False)
+    p = USNeuronPool(4, cfg); p.reset_state(1)
+    out = p.step(torch.full((1, 4), 4.0), torch.zeros(1, 4),
+                 torch.full((1, 4), 30.0))   # огромный GABA
+    assert float(out.v_s.min()) >= cfg.e_cl - 0.5
+
+
+def test_ado_raises_threshold():
+    """Закон 5: аденозин повышает Θ — организм «устаёт»."""
+    from neuroweave10.core.neuron import USNeuronPool
+    from neuroweave10.config import USNeuronCfg
+    p = USNeuronPool(4, USNeuronCfg(stochastic=False)); p.reset_state(1)
+    p.ado_i.fill_(0.0)
+    g = torch.full((1, 4), 0.8)
+    n_fresh = float(p.step(g, torch.zeros(1, 4), torch.zeros(1, 4)).s.sum())
+    p.reset_state(1); p.ado_i.fill_(1.0)
+    n_tired = float(p.step(g, torch.zeros(1, 4), torch.zeros(1, 4)).s.sum())
+    assert n_tired <= n_fresh
+
+
+def test_atp_debt_blocks_plasticity():
+    """Закон 5: аденилатный долг > порога → f_mod=0, веса заморожены."""
+    org = GenesisOrganism(genesis_cfg("tiny"), batch=1)
+    org.reset_state(1)
+    for col in org.hier.cols:
+        col.pyr.energy.fill_(0.1)          # глубокий долг
+    org.step(torch.zeros(1, org.cfg.input_dim), learn=True)
+    assert org.plasticity_blocked
+
+
+def test_hippocampus_primes_l5_via_nmda():
+    """Закон 4: CA1→L5 через NMDA+Mg-гейт — прайминг без спайка."""
+    from neuroweave10.cortex.column import CorticalColumn
+    from neuroweave10.config import ZoneCfg
+    z = ZoneCfg("Z", g=0.5, n_neurons=24, n_pv=4, n_sst=3, n_vip=2)
+    col = CorticalColumn(z, 12, 12, USNeuronCfg(stochastic=False),
+                         USSynapseCfg(), seed=0)
+    col.reset_state(1)
+    n_l5 = len(col.l5_idx)
+    out = col.step(torch.zeros(1, 12), torch.zeros(1, 12), 0.0, 0.0,
+                   hipp_drive=torch.full((1, n_l5), 5.0), learn=False)
+    assert out.s.shape[1] == 24            # прайминг не взорвал зону
+
+
+def test_regenesis_generate_stable_tail():
+    """Шаг 6 манифеста: 2000 токенов — без взрыва margin и петли."""
+    from neuroweave10.unified.pipeline import RegenesisOrganism
+    from neuroweave10.unified.pipeline import UnifiedConfig
+    u = RegenesisOrganism(UnifiedConfig(vocab_size=48),
+                          gcfg=genesis_cfg("tiny"))
+    r = u.generate(n_tokens=400, seed_tokens=[1, 5, 9])
+    assert r["margin_max"] < 50.0          # margin не взрывается
+    assert r["max_repeat_run"] < 20        # нет дегенеративной петли
+    assert r["tail_vocab"] >= 8            # хвост не схлопнулся в 1-2 слова
+    assert r["pathology"] is None
