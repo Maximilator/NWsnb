@@ -3,6 +3,11 @@
 Цифровой спайковый организм: **вычисление = память = обучение** в одном
 контуре. Этот репозиторий целиком посвящён проекту NEUROWEAVE.
 
+`neuroweave10` — **v10.0 «Genesis»**: реализация GENESIS_MANIFESTO —
+четырёхуровневая виртуальная биология (сенсорика→кора→память→сознание)
+с мультикомпартментными нейронами Urbanczik-Senn, трёхфакторным
+обучением без backprop, Modern-Hopfield Global Workspace, HOT MetaHead,
+Attention Schema и гомеостатическим контролем критичности σ≈1.
 `neuroweave9` — **v9.0 «Cortex» (The Great Merge)**: гибрид измеренного
 пайплайна обучения Spiker v6.0 и инноваций NEUROWEAVE 8.
 `neuroweave8` — ламинарный организм v8, используемый v9 как библиотека
@@ -21,18 +26,67 @@ python -m neuroweave9.train_cortex --max-stories 200 --holdout 40 \
 python -m neuroweave8.main --preset poc --steps 200 --batch 4
 python -m neuroweave8.bench --sweep --ticks 40   # свип масштабирования
 
-pytest tests/                     # 48 тестов: v8 ядро/организм/скейлинг + v9 cortex
+# v10 «Genesis» — демо организма (бодрствование → сон → отчёт)
+python -m neuroweave10.main --preset tiny --steps 120
+
+pytest tests/                     # 80+ тестов: v8 ядро/организм/скейлинг + v9 cortex + v10 genesis
 ```
 
 ## Состав репозитория
 
 | Путь | Содержимое |
 |---|---|
+| `neuroweave10/` | **v10.0 «Genesis»** — четырёхуровневая биология по манифесту: LCA-SDR энкодер, таламус FO/HO + TRN, 3-компартментные нейроны US, PV/SST/VIP микроцепь, трисинаптический гиппокамп с нейрогенезом и SWR-реплеем, BG-DDM Go/NoGo/STN, GW как Modern Hopfield, MetaHead (HOT), Attention Schema, полное нейромодуляторное облако, SOC-гомеостаз, детектор патологий |
 | `neuroweave9/` | **v9.0 «Cortex»** — ламинарные колонки A/B/C + θ-γ синхронизация полушарий (binder+VSA), Лапласова память и базальные ганглии Spiker, пайплайн «одной большой партии», EWC-контроль памяти, сон с реплеем. `train_cortex.py` — обучение + генерация |
 | `neuroweave8/` | **v8** — ламинарные колонки, гиппокамп, мета-контроллер нейромодуляции, Global Workspace, θ-γ рабочая память + фазовый VSA, Corpus Callosum, цикл сон/бодрствование, EWC, структурная пластичность, int8, NeuroSystem. Документация — `neuroweave8/README.md` |
 | `tests/` | Тест-пайплайн: v8 ядро (нейрон/синапс/колонка/шина/WS/VSA), организм, пайплайн, скейлинг + **v9 cortex** (контракт Spiker, Фаза 1, EWC, синк, сон, фасад) |
 | `data/` | TinyStories corpus (4000 историй) для пайплайна v9 |
 | `V8_V9_LOCK` | Коммит-хэш ядра v8, на которое рассчитан v9 |
+
+## v10.0 «Genesis» — виртуальная биология
+
+`neuroweave10` реализует GENESIS_MANIFESTO: состояние Ψ={V,W,M,E,Θ},
+такт dt=1 мс, все четыре уровня обновляются параллельно; обучение
+локально — трёхфакторное правило Urbanczik-Senn без backprop.
+
+- **Уровень 1 (сенсорика/таламус)**: `core/sdr.py` LCA-энкодер
+  (Rozell 2008) → `thalamus/trn.py` секторный GABA-гейт с латеральным
+  торможением → `thalamus/relay.py` FO-ядро с переключением
+  tonic/burst (Sherman) + HO-ядро (Pulvinar) с WTA-выбором L5-драйверов
+  и BG-дизингибицией; `core/criticality.py` MR-оценщик σ̂, лавины,
+  динамический диапазон Kinouchi-Copelli.
+- **Уровень 2 (кора)**: `core/neuron.py` — 3-компартментный нейрон
+  Urbanczik-Senn (сома + базальный AMPA + апикальный NMDA с Mg-блоком
+  Jahr-Stevens, ALIF-порог Θ, KATP/GIRK метаболические токи,
+  нейростероидный гейн GABA); `cortex/column.py` — PV k-WTA, SST
+  апикальный гейт, VIP-дизингибиция g=g₀/(1+([VIP]/Kd)ⁿ); ошибка
+  S_i−φ(V*_D) — предиктивное кодирование внутри дендрита;
+  `cortex/hierarchy.py` — градиент τ(g): SENS 20мс → ASSOC 100мс →
+  PFC 1-2с, трансталамический FF/FB.
+- **Уровень 3 (память/мотивация)**: `memory/hippocampus.py` —
+  EC→DG(разрежение 2%, нейрогенез)→CA3(Хопфилд, one-shot η=10×)→CA1
+  (компаратор → VTA-DA/LC-NE бёрсты); SWR-реплей при ACh↓/Ado↑ с
+  приоритетом |err|+β·unc; `action/basal_ganglia.py` — DDM с
+  адаптивным порогом a(t)=a₀+k_STN·конфликт+α_OX+β_ADO+θ_5HT,
+  TD-RPE с Go/NoGo и A2A-D2 гетеромером; `chemistry/volume.py` —
+  NO-диффузия (функция Грина), 2-AG ретроградная супрессия и
+  выталкивание аттрактора, H₂S→D-серин.
+- **Уровень 4 (сознание)**: `consciousness/workspace.py` — GW как
+  Modern Hopfield Network (Ramsauer 2021): ξ_new=X·softmax(βXᵀξ),
+  ignition A=σ(γ(S−S_th)), K=4 слота; `meta_head.py` — HOT:
+  confidence/L̂/surprise/novelty, декомпозиция epistemic/aleatoric,
+  M-ratio, калибровка Brier; `attention_schema.py` — AST с отчётом
+  и корректирующим гейном → TRN.
+- **Химия**: `chemistry/modulators.py` — DA/NE/ACh/5-HT/Orexin/
+  Adenosine(Borbely S-процесс)/Cortisol(MR→GR)/Lactate; f_mod-гейт
+  пластичности.
+- **Гомеостаз**: `homeostasis/controller.py` — σ̂→1: депрессия Левина,
+  intrinsic plasticity ΔΘ=η(x−H), iSTDP Vogels, SORN-нормировка.
+- **Патологии**: автоостановка при σ>1.2>100мс (эпилепсия), σ<0.7>500мс
+  (кома), метаболическом коллапсе, вечном сне/бодрствовании, взрыве
+  весов — `organism/genesis.py:_check_pathology`.
+- `organism/system.py` — GenesisSystem фасад (boot/run/sleep/report/
+  save/load), `main.py` — демо жизненного цикла.
 
 ## v9.0 «Cortex» — The Great Merge
 
