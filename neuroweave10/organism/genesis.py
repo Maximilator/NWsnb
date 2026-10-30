@@ -81,6 +81,8 @@ class GenesisOrganism:
                                          cfg.chem.h2s_tau)
         self.homeo = HomeostaticController(cfg.homeo)
         self.xchem = ExtendedChemistry()
+        from ..core.interoception import InteroceptiveField
+        self.intero = InteroceptiveField([z.name for z in cfg.zones])
         self.dash = ConsciousnessDashboard()
         self.t = 0
         self.pathology: Optional[str] = None
@@ -220,7 +222,8 @@ class GenesisOrganism:
         hippo_out: HippoOut = self.hipp.step(ec_in, s.ach, s.ado,
                                            learn=learn and awake)
         self.hipp.store_episode(ec_in, hippo_out.dg, hippo_out.ca3,
-                                err_mean, unc)
+                                err_mean, unc,
+                                da_tag=hippo_out.vta_da_burst)
         if not awake:  # SWR-реплей
             def cortical_write(ec, err):
                 for col in self.hier.cols:
@@ -261,6 +264,17 @@ class GenesisOrganism:
                                 if awake else 0.0,
                                 actual_focus=gw_out.winner_zone
                                 if gw_out.winner_zone >= 0 else 0)
+        # Интероцепция: сеть читает собственное состояние — метапознание
+        zone_states = {z.name: torch.tensor([
+            float(hout.zones[z.name].v_s.mean()) / 100.0 + 0.5,
+            float(col.pyr.energy.mean()),
+            float(hout.zones[z.name].ca.mean()),
+            float(hout.zones[z.name].s.mean())])
+            for z, col in zip(cfg.zones, self.hier.cols)}
+        intero_out = self.intero.read(zone_states)
+        ast_out.report["self_state"] = intero_out.summary
+        ast_out.report["intero_activity"] = float(intero_out.state_vec.mean())
+        self._last_intero = intero_out
         self._last_ast = ast_out
         self._last_mismatch = hippo_out.mismatch
 

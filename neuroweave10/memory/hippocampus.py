@@ -86,7 +86,9 @@ class Hippocampus:
     def ca3_retrieve(self, cue: torch.Tensor) -> torch.Tensor:
         """Pattern completion: несколько итераций рекуррентной динамики."""
         a = cue.clone()
-        for _ in range(self.cfg.ca3_steps):
+        ach = getattr(self, "_ach", 1.0)
+        n_steps = int(self.cfg.ca3_steps * (2.0 - ach))
+        for _ in range(max(2, n_steps)):
             a = torch.tanh(a @ self.w_ca3.t() * 2.0)
         return (a > 0).float()
 
@@ -94,13 +96,17 @@ class Hippocampus:
              learn: bool = True) -> HippoOut:
         """Бодрствование: кодирование; сон (ACh↓,Ado↑): SWR-реплей."""
         self.tick_n += 1
+        self._ach = ach
         if self.tick_n % self.cfg.neurogenesis_period == 0:
             self.neurogenesis()
         proj = ec_in @ self.w_in_ec.t()
         ec = torch.cos(self.grid_freq * proj + self.grid_phase)
         dg = self.dg_code(ec)
         ca3_raw = torch.relu(dg @ self.w_dg_ca3.t())
-        ca3 = ca3_raw
+        # ACh-гейт режимов (Hasselmo): high ACh = encode (слабая рекуррентная
+        # доминация), low ACh = recall (рекуррентная сеть доминирует)
+        ach_gain = float(torch.clamp(torch.tensor(ach), 0.0, 1.0))
+        ca3 = ca3_raw * (0.5 + 0.5 * ach_gain)
         if learn:
             self.ca3_store(ca3)
         ca3_full = self.ca3_retrieve(ca3)
@@ -117,9 +123,12 @@ class Hippocampus:
 
     def store_episode(self, ec: torch.Tensor, dg: torch.Tensor,
                       ca3: torch.Tensor, error: float,
-                      uncertainty: float) -> None:
+                      uncertainty: float, da_tag: float = 0.0) -> None:
+        # DA-тег: дофаминовый бёрст помечает значимые эпизоды —
+        # повышает их приоритет в SWR-реплее (вспоминание важного).
         self.episodes.append((ec.detach().clone(), dg.detach().clone(),
-                              ca3.detach().clone(), float(error),
+                              ca3.detach().clone(),
+                              float(error) * (1.0 + da_tag),
                               float(uncertainty)))
         if len(self.episodes) > self.max_episodes:
             self.episodes.pop(0)

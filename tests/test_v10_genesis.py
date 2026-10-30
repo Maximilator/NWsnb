@@ -501,3 +501,41 @@ def test_unified_reward_drives_da():
     r2 = org.step_token(toks, torch.tensor([7]))   # CE есть → reward<0
     assert r1["reward"] == 0.0
     assert r2["reward"] < 0.0
+
+
+# ---------- Интероцепция и модуляторы-память ----------
+
+def test_interoceptive_field_reads_neighbor_state():
+    """Интеро-нейроны кодируют состояние соседних зон."""
+    from neuroweave10.core.interoception import InteroceptiveField
+    f = InteroceptiveField(["SENS", "PFC"], n_int=8)
+    out = f.read({"SENS": torch.tensor([0.4, 0.9, 0.3, 0.6]),
+                  "PFC": torch.tensor([0.5, 0.8, 0.2, 0.5])})
+    assert out.state_vec.numel() == 16
+    assert "SENS_self" in out.summary
+
+
+def test_ach_gates_hippocampus_mode():
+    """ACh: высокий=кодирование, низкий=извлечение (больше итераций CA3)."""
+    from neuroweave10.memory.hippocampus import Hippocampus
+    from neuroweave10.config import HippocampusCfg
+    h = Hippocampus(HippocampusCfg(n_ec=16, n_dg=64, n_ca3=32,
+                                   ca3_steps=4))
+    x = torch.rand(1, 16)
+    h.step(x, ach=0.9, adenosine=0.0)
+    hi = h._ach
+    h.step(x, ach=0.1, adenosine=0.0)
+    assert hi > h._ach
+
+
+def test_da_tag_prioritizes_replay():
+    """Эпизод с DA-бёрстом получает более высокий приоритет реплея."""
+    from neuroweave10.memory.hippocampus import Hippocampus
+    from neuroweave10.config import HippocampusCfg
+    h = Hippocampus(HippocampusCfg(n_ec=16, n_dg=64, n_ca3=32))
+    ec = torch.rand(1, 16)
+    h.store_episode(ec, torch.rand(1, 64), torch.rand(1, 32), 0.5, 0.5,
+                    da_tag=2.0)
+    h.store_episode(ec, torch.rand(1, 64), torch.rand(1, 32), 0.5, 0.5,
+                    da_tag=0.0)
+    assert h.episodes[0][3] > h.episodes[1][3]
