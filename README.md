@@ -80,6 +80,12 @@ pytest tests/                     # 80+ тестов: v8 ядро/организ
 - **Химия**: `chemistry/modulators.py` — DA/NE/ACh/5-HT/Orexin/
   Adenosine(Borbely S-процесс)/Cortisol(MR→GR)/Lactate; f_mod-гейт
   пластичности.
+- **Дендритное дерево Poirazi** (Neuron 2003): базальный вход через K ветвей с суперлинейной нелинейностью и локальными NMDA-плато; BAC-firing (Larkum) — bAP+апикал в окне 5 мс снижает θ_Ca → Ca-берст (сигнал пластичности).
+- **Расширенный химический пул** (`chemistry/agents.py`, chemical.md: 37 агентов): гистамин→sAHP-блок, NPY/динорфин/AEA/галанин→P_release, D-серин/Zn²⁺/ДГЭА→NMDA ко-агонистный гейт, E2→сдвиг Θ, аллопрегнанолон→GABA-PAM, ATP-P2X→сигнал тревоги, глутамин-цикл→ресурс u_syn, CO→BK-потолок частоты, энкефалин/β-эндорфин→дизингибиция, CRH→θ_LTP.
+- **Дашборд сознания** (`consciousness/metrics.py`, consciousness2.md): PCI-прокси (Лемпель-Зив), каузальная плотность, широта рассылки R_bc, γ_ign, ECE-калибровка, L_schema, FFR/RDI — по GWT/IIT/RPT/HOT/AST.
+- **MR-оценщик σ̂**: автокорреляционная регрессия log r_k = k·log m (Wilting-Priesemann), цель σ≈0.95–0.99 (in-vivo субкритичный «ревербирующий» режим, не σ=1); динамический диапазон Δ=10·log₁₀(F_0.9/F_0.1).
+- **Eligibility-trace e_ij** и Vogels iSTDP в канонической форме (Δw=η(x_post−α) при пре-, η·x_pre при пост-спайке, α=2ρ₀τ).
+- **Гиппокамп**: grid-код EC (cos(ω·proj+φ), метрика MEC) + темпороаммонический путь EC_III→CA1 в компараторе.
 - **Гомеостаз**: `homeostasis/controller.py` — σ̂→1: депрессия Левина,
   intrinsic plasticity ΔΘ=η(x−H), iSTDP Vogels, SORN-нормировка.
 - **Патологии**: автоостановка при σ>1.2>100мс (эпилепсия), σ<0.7>500мс
