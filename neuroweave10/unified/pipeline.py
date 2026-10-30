@@ -228,6 +228,7 @@ class RegenesisOrganism(UnifiedOrganism):
         self.motor = MotorPool(self.ucfg.vocab_size, n_l5,
                                self.gcfg.hippo.n_ec, self.gcfg.input_dim,
                                self.gcfg.motor, seed=seed + 7)
+        self.motor.attach_basal_ganglia(self.gcfg.bg.n_actions)
         self.motor.reset_state(batch)
         self._last_motor: Optional[Dict] = None
 
@@ -250,6 +251,8 @@ class RegenesisOrganism(UnifiedOrganism):
         lap = getattr(self.org, "_last_lap_slow", None)
         if lap is not None and lap.dim() == 1:
             lap = lap.unsqueeze(0)
+        # Закон 1: канал BG-DDM открывает моторное действие
+        self.motor.set_bg_decision(out.action)
         mout = self.motor.step(s_l5, hipp_v, lap, ou_on=learn)
         reward = 0.0
         if next_ids is not None and learn:

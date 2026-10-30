@@ -126,7 +126,8 @@ class CorticalColumn:
                             nmda_gain=mod_ctx.get("nmda_gain", 1.0),
                             p_rel=mod_ctx.get("p_rel", 1.0),
                             vth_shift=mod_ctx.get("vth_shift", 0.0),
-                            gaba_tonic=mod_ctx.get("gaba_tonic", 1.0))
+                            gaba_tonic=mod_ctx.get("gaba_tonic", 1.0),
+                            g_gaba_d=g_sst)   # SST — шунт апикала (Закон 3)
         self._last_s = out.s
 
         if learn:

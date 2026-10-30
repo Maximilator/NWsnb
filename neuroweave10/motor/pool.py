@@ -55,16 +55,33 @@ class MotorPool:
         self.w_l5 = torch.randn(vocab_size, n_l5, generator=g) * 0.35
         self.w_hip = torch.randn(vocab_size, n_hipp, generator=g) * 0.20
         self.w_lap = torch.randn(vocab_size, n_lap, generator=g) * 0.10
+        # Рекуррентные связи моторной коры (как в реальном M1)
+        self.w_rec_m = torch.randn(vocab_size, vocab_size,
+                                   generator=g) * 0.05
+        self.w_rec_m.fill_diagonal_(0.0)
+        # Базальные ганглии → моторный гейт (n_actions каналов выбора)
+        self.n_bg = 0
+        self.w_bg = None
         # STP Tsodyks-Markram: ресурс x и утилизация u на каждый афферент
         self.stp_x = torch.ones(vocab_size, n_l5)
         self.stp_u = torch.ones(vocab_size, n_l5) * cfg.stp_u0
         # Усталость выхода моторного нейрона (аксональная депрессия)
         self.out_fatigue = torch.ones(vocab_size)
+        # Адаптивный STP: частота афферента → глубина депрессии и τ_rec
+        self.rate_aff = torch.zeros(n_l5)
+        self.rate_post = torch.zeros(vocab_size)
         # Следы трёхфакторного обучения
         self.z_pre = torch.zeros(n_l5)
         self.z_post = torch.zeros(vocab_size)
         self.eligibility = torch.zeros(vocab_size, n_l5)
         self._last_counts = torch.zeros(vocab_size)
+        self._bg_decision: Optional[torch.Tensor] = None
+
+    def attach_basal_ganglia(self, n_actions: int, seed: int = 0) -> None:
+        """BG→моторная кора: решение DDM открывает канал действия."""
+        g = torch.Generator().manual_seed(seed)
+        self.n_bg = n_actions
+        self.w_bg = torch.randn(self.vocab, n_actions, generator=g) * 0.15
 
     def reset_state(self, batch: int, device=None, dtype=torch.float32):
         f = lambda *s: torch.zeros(batch, *s, device=device, dtype=dtype)
@@ -85,6 +102,15 @@ class MotorPool:
         w_eff = self.w_l5 * self.stp_x * self.stp_u
         g_l5 = (s_l5 @ w_eff.t()).clamp(min=0.0) * 2.0
         g_l5 = g_l5 * self.out_fatigue.unsqueeze(0)
+        # Рекуррентный контур моторной коры: спайки соседей модулируют
+        # мембрану — самоорганизация последовательностей
+        if self._last_counts is not None:
+            g_l5 = g_l5 + (self._last_counts.unsqueeze(0)
+                           @ self.w_rec_m.t()).clamp(min=0.0) * 0.3
+        # Базальные ганглии: решение DDM открывает канал действия
+        if self.w_bg is not None and self._bg_decision is not None:
+            g_l5 = g_l5 + (self._bg_decision.unsqueeze(0)
+                           @ self.w_bg.t()).clamp(min=0.0)
         # Гиппокамп: только через Mg²⁺-блок NMDA — прайминг, не спайк
         g_hipp = torch.zeros_like(g_l5)
         if hipp_v is not None:
@@ -116,22 +142,46 @@ class MotorPool:
         self.theta = self.theta + c.beta_adapt * s \
             - dt * (self.theta - c.theta0) / c.tau_adapt
         self.counts += s
-        # STP Tsodyks-Markram на активных афферентах:
-        # u+=U(1−u); x−=u·x; x+= (1−x)/τ_D · dt — истощение и восстановление
-        act = s_l5.unsqueeze(1).clamp(0.0, 1.0)          # [B,1,n_l5]
-        u_rel = self.stp_u * self.stp_x
-        self.stp_x = (self.stp_x - u_rel * act.mean(0).clamp(0, 1)
+        # Адаптивный STP Tsodyks-Markram: история частоты афферента
+        # задаёт глубину депрессии и время восстановления — частый вход
+        # истощается глубже (u↑→быстрый расход x) и восстанавливается
+        # через ~25 мс, не мгновенно.
+        self.rate_aff = self.rate_aff * 0.98 + s_l5.mean(0) * 0.02
+        self.rate_post = self.rate_post * 0.98 + s.mean(0) * 0.02
+        u_eff = (c.stp_u0 * (1.0 + 2.0 * self.rate_aff)).clamp(max=0.95)
+        tau_d_eff = c.stp_tau_d / (1.0 + 3.0 * self.rate_aff)  # → ~25-30 мс
+        act = s_l5.mean(0).clamp(0.0, 1.0)                   # [n_l5]
+        u_rel = u_eff.unsqueeze(0) * self.stp_x              # [V,n_l5]
+        self.stp_x = (self.stp_x - u_rel * act.unsqueeze(0)
                       ).clamp(min=0.0)
-        self.stp_u = (self.stp_u + c.stp_u0 * (1.0 - self.stp_u)
-                      * act.mean(0).clamp(0, 1)).clamp(max=1.0)
-        self.stp_x += (1.0 - self.stp_x) * (dt / c.stp_tau_d)
+        self.stp_u = (self.stp_u
+                      + u_eff.unsqueeze(0) * (1.0 - self.stp_u)
+                      * act.unsqueeze(0)).clamp(max=1.0)
+        self.stp_x += (1.0 - self.stp_x) * (dt / tau_d_eff.unsqueeze(0))
         self.stp_u += (c.stp_u0 - self.stp_u) * (dt / c.stp_tau_f)
-        # Усталость выхода победивших нейронов: спайк → депрессия
+        # Усталость выхода: 3 подряд спайка → ресурс ~0.1;
+        # восстановление ~25-30 мс, замедленное при высокой частоте.
         self.out_fatigue = (self.out_fatigue
-                            - 0.25 * s.mean(0)).clamp(min=0.05)
-        self.out_fatigue += (1.0 - self.out_fatigue) * (dt / c.out_tau)
+                            - 0.4 * (1.0 + self.rate_post)
+                            * s.mean(0)).clamp(min=0.02)
+        self.out_fatigue += (1.0 - self.out_fatigue) * (
+            dt / (c.out_tau * (1.0 + 2.0 * self.rate_post)))
 
     # ------------------------------------------------------------------
+    def set_bg_decision(self, action: Optional[torch.Tensor],
+                        n_actions: int = 0) -> None:
+        """Решение BG-DDM как one-hot канал в моторный пул."""
+        if action is None or self.w_bg is None:
+            self._bg_decision = None
+            return
+        a = int(action.flatten()[0].item()) if torch.is_tensor(action)             else int(action)
+        if a < 0:
+            self._bg_decision = None
+            return
+        oh = torch.zeros(self.w_bg.shape[1])
+        oh[min(a, self.w_bg.shape[1] - 1)] = 1.0
+        self._bg_decision = oh
+
     def step(self, s_l5: torch.Tensor,
              hipp_v: Optional[torch.Tensor] = None,
              lap_slow: Optional[torch.Tensor] = None,
@@ -150,6 +200,10 @@ class MotorPool:
             token = int(counts.argmax().item())          # WTA по спайкам
         else:
             token = int(self.v.mean(0).argmax().item())  # гонка мембран
+        # Адаптация победителя: максимальная деполяризация → максимум
+        # Ca²⁺-притока → sAHP-порог растёт и без спайка (повторный
+        # выбор того же нейрона сам себя тормозит).
+        self.theta[:, token] += c.beta_adapt * 2.0
         vv = self.v.mean(0)
         top2 = vv.topk(min(2, self.vocab)).values
         margin = float(top2[0] - (top2[1] if top2.numel() > 1

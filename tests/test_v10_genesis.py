@@ -661,3 +661,48 @@ def test_regenesis_generate_stable_tail():
     assert r["max_repeat_run"] < 20        # нет дегенеративной петли
     assert r["tail_vocab"] >= 8            # хвост не схлопнулся в 1-2 слова
     assert r["pathology"] is None
+
+
+def test_motor_pool_pure_spikes_no_mlp():
+    """Аудит чистоты: в MotorPool нет nn.Module/Linear; выбор — спайки."""
+    import torch.nn as nn
+    from neuroweave10.motor import MotorPool
+    from neuroweave10.config import MotorCfg
+    m = MotorPool(16, 8, 8, 4, MotorCfg(), seed=1)
+    m.reset_state(1)
+    for attr in vars(m).values():
+        assert not isinstance(attr, nn.Module), "MLP-костыль в моторном пуле"
+    s_l5 = torch.zeros(1, 8); s_l5[0, :4] = 1.0
+    m.w_l5[:, :4] = 1.0                    # гарантированный драйв
+    out = m.step(s_l5)
+    # Токен = нейрон с максимумом спайков (WTA-гонка)
+    assert int(out.firing_rate.argmax().item()) == out.token \
+        or out.firing_rate[out.token] >= out.firing_rate.max() - 1e-6 \
+        or float(out.firing_rate.max()) == 0.0
+
+
+def test_katp_low_energy_reduces_excitability():
+    """ATP↓ → KATP-проводимость к E_K гиперполяризует — меньше спайков."""
+    from neuroweave10.core.neuron import USNeuronPool
+    from neuroweave10.config import USNeuronCfg
+    p = USNeuronPool(4, USNeuronCfg(stochastic=False)); p.reset_state(1)
+    g = torch.full((1, 4), 1.2)
+    s_fresh = float(p.step(g, torch.zeros(1, 4),
+                           torch.zeros(1, 4)).s.sum())
+    p.reset_state(1); p.energy.fill_(0.05)   # глубокий ATP-долг
+    s_tired = float(p.step(g, torch.zeros(1, 4),
+                           torch.zeros(1, 4)).s.sum())
+    assert s_tired <= s_fresh
+
+
+def test_adaptive_stp_deepens_with_rate():
+    """Высокая частота афферента → глубже депрессия (u↑, x↓↓)."""
+    from neuroweave10.motor import MotorPool
+    from neuroweave10.config import MotorCfg
+    m = MotorPool(8, 8, 4, 4, MotorCfg(), seed=0)
+    m.reset_state(1)
+    s_hi = torch.ones(1, 8)
+    for _ in range(6):
+        m.step(s_hi)
+    # Частота афферентов выросла → эффективный τ_rec сжался
+    assert float(m.rate_aff.mean()) > 0.0

@@ -63,6 +63,15 @@ class BasalGanglia:
              ht: float, da_d2_shift: float = 0.0) -> BGOut:
         """ctx [B,N] — кортикальный контекст (PFC)."""
         c = self.cfg
+        # Кортикостриатарная проекция: ширина весов = ширине PFC-входа
+        # (n_actions — число аккумуляторов решений, не обязан
+        # совпадать с числом нейронов PFC).
+        if self.w_go.shape[1] != ctx.shape[-1]:
+            g = torch.Generator().manual_seed(11)
+            self.w_go = torch.randn(c.n_actions, ctx.shape[-1],
+                                    generator=g) * 0.1
+            self.w_nogo = torch.randn(c.n_actions, ctx.shape[-1],
+                                      generator=g) * 0.1
         v = ctx @ (self.w_go - self.w_nogo).t()          # [B,N] дрейф
         v = v.mean(0)
         # А2А-D2: аденозин ослабляет D2 → NoGo-путь слабее

@@ -247,11 +247,15 @@ class GenesisOrganism:
                                   zn=self.xchem.l.zn, mg=1.0)
         hout: HierarchyOut = self.hier.step(
             fo_out, gw_b, ho_drive, f_mod, vip_mod, learn=learn)
-        # Медленный лапласов контекст сдвигает Θ L5 (возбудимость):
-        # длинный контекст ↑ → L5 легче достигает порога.
-        th_shift = (0.5 - lap_scalar) * 0.4
+        # Лапласовы медленные шкалы → adapt L5: приращение порога на
+        # спайк масштабируется длинным контекстом — клетка становится
+        # более/менее адаптируемой в зависимости от истории входа.
+        lap_gain = 1.0 + (lap_scalar - 0.5) * 0.8
         for col in self.hier.cols:
-            col.pyr.theta[:, col.l5_idx] += th_shift * cfg.dt * 0.01
+            s_l5 = col._last_s[:, col.l5_idx] \
+                if hasattr(col, "_last_s") else 0.0
+            col.pyr.theta[:, col.l5_idx] += \
+                s_l5 * (lap_gain - 1.0) * cfg.neuron.beta_adapt * cfg.dt
         self._prev_l5 = hout.l5
         self._prev_pfc = hout.zones[cfg.zones[-1].name].s
         self._prev_spikes = hout.spikes_all

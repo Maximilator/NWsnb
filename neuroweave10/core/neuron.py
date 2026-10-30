@@ -93,6 +93,7 @@ class USNeuronPool:
              p_rel: float = 1.0,        # P_release-масштаб (NPY/Dyn/AEA/Gal)
              vth_shift: float = 0.0,    # E2-мембранный сдвиг Θ (мВ)
              gaba_tonic: float = 1.0,   # ALLO: GABA_A PAM
+             g_gaba_d: Optional[torch.Tensor] = None,  # SST→апикал шунт
              ) -> NeuronOut:
         """Один шаг интеграции (dt=1 мс), все токи сразу."""
         c = self.cfg
@@ -106,9 +107,13 @@ class USNeuronPool:
         self.v_d = self.v_d + dt * (dv_d / c.tau_d)
 
         # Апикальный: NMDA·(D-ser·Zn·DHEA-гейт)·B(V_A)·(E_exc−V_A)
+        # + SST-шунт: дендритное торможение — проводимость к E_Cl,
+        # не вычитание тока (Закон 3 во всех компартментах).
         b_v = mg_block(self.v_a, c.mg)
+        g_sst = 0.0 if g_gaba_d is None else g_gaba_d * gaba_tonic
         i_a = c.g_a * (B - self.v_a) \
-            + g_nmda * nmda_gain * b_v * (c.e_exc - self.v_a)
+            + g_nmda * nmda_gain * b_v * (c.e_exc - self.v_a) \
+            + g_sst * (c.e_cl - self.v_a)
         dv_a = (-c.g_l * (self.v_a - c.e_l) + i_a) / c.c_m
         self.v_a = self.v_a + dt * (dv_a / c.tau_d_apical)
 
@@ -117,7 +122,8 @@ class USNeuronPool:
         # (тонический PAM + нейростероидный буфер — сон/анксиолиз).
         g_inh = g_gaba * gaba_tonic * (1.0 + c.allo_gain * self.allo)
         # Метаболический тормоз: KATP (ATP↓) + GIRK (Ado A1) → V_S к E_K.
-        g_met = c.k_atp * (1.0 - self.energy) + c.k_girk * self.ado_i
+        g_met = c.k_atp * (1.0 - self.energy) ** 2 \
+            + c.k_girk * self.ado_i
         # GPCR-K+-токи (§3.1): M-ток подавляется ACh (mAChR→I_M↓→Θ↓),
         # sAHP растёт по Ca2+ и блокируется гистамином H1.
         g_m = 0.05 / (1.0 + ach / 0.5)          # M-current (K_v7)
