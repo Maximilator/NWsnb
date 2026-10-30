@@ -164,3 +164,44 @@ class UnifiedOrganism:
                 "sparse_saving": self.event_stats.saving,
                 "episodes": len(self.org.hipp.episodes),
                 "pathology": self.org.pathology}
+
+
+# ----------------------------------------------------------------------
+def run_tinystories(data_path: str = "data/TinyStories_train_4k.txt",
+                    preset: str = "tiny", max_stories: int = 24,
+                    seq_len: int = 16, max_vocab: int = 128,
+                    epochs: int = 2) -> Dict:
+    """Реальные TinyStories → организм: perplexity до/после эпох.
+
+    Токенизатор и словарь v9; каждый токен — кадр спайков в таламус;
+    CE следующего токена → reward → DA/TD-пластичность + Adam-обучение
+    ридаута. Между эпохами — сон с SWR-консолидацией."""
+    from neuroweave9.data import (load_stories, tokenize_text,
+                                  build_vocab_and_sequences)
+    stories = load_stories(data_path, max_stories=max_stories)
+    itos, stoi, x_seq, y_seq, _ = build_vocab_and_sequences(
+        stories, max_vocab_size=max_vocab, seq_len=seq_len,
+        batch_size=1)
+    u = UnifiedOrganism(UnifiedConfig(vocab_size=len(itos)),
+                        gcfg=genesis_cfg(preset))
+    metrics: Dict = {"vocab": len(itos), "tokens": int(y_seq.numel())}
+    ce_hist: List[float] = []
+    for ep in range(epochs):
+        ce_sum, n = 0.0, 0
+        for b in range(x_seq.shape[1]):
+            for t in range(x_seq.shape[0] - 1):
+                tok = x_seq[t, b].argmax().unsqueeze(0)
+                nxt = y_seq[t, b].unsqueeze(0)
+                r = u.step_token(tok, nxt, learn=True)
+                if u._pred_logits is not None and t > 0:
+                    ce_sum += float(F.cross_entropy(
+                        u._pred_logits.float(), y_seq[t, b:b+1]).item())
+                    n += 1
+        ce = ce_sum / max(1, n)
+        ce_hist.append(ce)
+        u.sleep(ticks=40)        # консолидация между эпохами
+    metrics["ce_per_epoch"] = ce_hist
+    metrics["perplexity_per_epoch"] = [
+        float(torch.exp(torch.tensor(min(10.0, c)))) for c in ce_hist]
+    metrics["organism"] = u.report()
+    return metrics

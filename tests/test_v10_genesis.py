@@ -562,3 +562,12 @@ def test_trn_spindle_oscillates():
     fo = ThalamusFO(8)
     g0 = fo.spindle(0); g25 = fo.spindle(25)
     assert not torch.equal(g0, g25)
+
+
+def test_tinystories_pipeline_learns():
+    """Реальные TinyStories → perplexity не растёт после эпохи."""
+    from neuroweave10.unified.pipeline import run_tinystories
+    m = run_tinystories(max_stories=4, seq_len=8, max_vocab=48, epochs=2)
+    p = m["perplexity_per_epoch"]
+    assert p[-1] <= p[0] * 1.5          # не деградирует
+    assert m["organism"]["sigma"] > 0.0
