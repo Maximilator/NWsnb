@@ -290,8 +290,9 @@ class GenesisOrganism:
             def cortical_write(ec, err):
                 for col in self.hier.cols:
                     for w in (col.w_ff, col.w_rec):
-                        w.w += cfg.synapse.eta * 0.05 * err * w.w.sign() \
-                            * w.mask
+                        w.w = (w.w + cfg.synapse.eta * 0.05 * err
+                               * w.w.sign() * w.mask).clamp(
+                                   w.cfg.w_min, w.cfg.w_max)
             replayed = self.hipp.swr_replay(cortical_write)
             hippo_out.replayed = replayed
         no_field = self.volume.step(
